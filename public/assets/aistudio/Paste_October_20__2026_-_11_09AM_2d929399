@@ -1,0 +1,827 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GutiAi Playground</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Marked.js Markdown Engine -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    * {
+      outline: none !important;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #0b0c0f;
+      overflow-x: hidden;
+    }
+    
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 350, 'GRAD' 0, 'opsz' 20;
+    }
+
+    /* ROTATING 5-COLOR BORDER */
+    @keyframes rotateConicBorder {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .rotating-border-wrapper {
+      position: relative;
+      border-radius: 26px;
+      overflow: hidden;
+      padding: 2.2px;
+    }
+    .rotating-conic-glow {
+      position: absolute;
+      inset: -300%;
+      background: conic-gradient(from 0deg, #ef476f 0%, #ffd166 20%, #06d6a0 40%, #118ab2 60%, #073b4c 80%, #ef476f 100%);
+      filter: blur(14px);
+      opacity: 0.55;
+      animation: rotateConicBorder 5s linear infinite;
+      pointer-events: none;
+    }
+    .rotating-conic-sharp {
+      position: absolute;
+      inset: -300%;
+      background: conic-gradient(from 0deg, #ef476f 0%, #ffd166 20%, #06d6a0 40%, #118ab2 60%, #073b4c 80%, #ef476f 100%);
+      animation: rotateConicBorder 5s linear infinite;
+      pointer-events: none;
+    }
+    .rotating-border-wrapper:focus-within .rotating-conic-glow {
+      opacity: 0.9;
+      filter: blur(18px);
+    }
+
+    /* Google AI Studio Shimmer */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .thinking-shimmer {
+      background: linear-gradient(90deg, #8e918f 0%, #e3e3e3 50%, #8e918f 100%);
+      background-size: 200% 100%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: shimmer 2s infinite linear;
+    }
+
+    /* Neutral Dark Buttons */
+    .neutral-btn {
+      background-color: #1a1c22;
+      color: #e3e3e3;
+      border: none !important;
+      transition: background-color 0.2s ease;
+    }
+    .neutral-btn:hover {
+      background-color: #262932;
+      color: #ffffff;
+    }
+
+    /* AI STYLISH MARKDOWN & TABLES */
+    .ai-output h1 { font-size: 1.35rem; font-weight: 700; color: #fff; margin: 1.1rem 0 0.5rem; }
+    .ai-output h2 { font-size: 1.2rem; font-weight: 700; color: #fff; margin: 0.95rem 0 0.4rem; }
+    .ai-output h3 { font-size: 1.05rem; font-weight: 600; color: #fff; margin: 0.8rem 0 0.35rem; }
+    .ai-output p { margin-bottom: 0.65rem; line-height: 1.68; color: #e3e3e3; }
+    .ai-output strong { font-weight: 600; color: #fff; }
+    .ai-output em { color: #d1d5db; font-style: italic; }
+    .ai-output ul { list-style-type: disc; padding-left: 1.3rem; margin-bottom: 0.8rem; }
+    .ai-output ol { list-style-type: decimal; padding-left: 1.3rem; margin-bottom: 0.8rem; }
+    .ai-output li { margin-bottom: 0.25rem; color: #e3e3e3; }
+    .ai-output blockquote { border-left: 3px solid #118ab2; padding: 0.5rem 0.85rem; background: rgba(17,138,178,0.1); border-radius: 0 0.5rem 0.5rem 0; margin: 0.85rem 0; color: #cbd5e1; }
+    .ai-output hr { border-color: rgba(255,255,255,0.08); margin: 1.25rem 0; }
+    
+    .ai-output table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.84rem;
+      border-radius: 0.75rem;
+      overflow: hidden;
+      background: #14161d;
+      border: 1px solid rgba(255,255,255,0.07);
+      display: block;
+      overflow-x: auto;
+    }
+    .ai-output th {
+      background: #1c1f28;
+      padding: 0.65rem 0.85rem;
+      text-align: left;
+      font-weight: 600;
+      color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      white-space: nowrap;
+    }
+    .ai-output td {
+      padding: 0.6rem 0.85rem;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      color: #d1d5db;
+      vertical-align: top;
+      line-height: 1.5;
+    }
+    .ai-output tr:last-child td { border-bottom: none; }
+    .ai-output tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .ai-output code { background: #1c1f28; padding: 0.15rem 0.4rem; border-radius: 0.35rem; font-family: monospace; font-size: 0.86em; color: #e2e8f0; }
+    .ai-output pre { background: #12141a; padding: 0.85rem 1rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06); overflow-x: auto; margin: 0.85rem 0; }
+    .ai-output pre code { background: transparent; padding: 0; color: #e2e8f0; }
+
+    /* NO WHITE FRAME / REMOVE NATIVE SCROLLBAR ARTIFACTS */
+    ::-webkit-scrollbar {
+      width: 0px !important;
+      height: 0px !important;
+      background: transparent !important;
+    }
+    html, body, div {
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
+    }
+  </style>
+</head>
+<body class="min-h-screen text-[#e3e3e3] flex flex-col justify-between">
+
+  <!-- Responsive Wrapper -->
+  <div class="w-full flex-1 flex flex-col justify-between max-w-4xl mx-auto h-screen relative">
+    
+    <!-- Top Header -->
+    <header class="w-full flex items-center justify-between px-4 sm:px-6 pt-4 pb-2 z-20">
+      <div class="flex items-center gap-3">
+        <button class="w-8 h-8 flex items-center justify-center rounded-full neutral-btn shadow-sm">
+          <span class="material-symbols-outlined text-[18px]">menu</span>
+        </button>
+        <span class="text-[15px] font-medium tracking-tight text-white">GutiAi Playground</span>
+      </div>
+
+      <!-- Account Session -->
+      <div class="relative">
+        <button 
+          id="open-login-btn"
+          class="h-8 px-4 neutral-btn active:scale-95 text-[12px] font-medium rounded-full flex items-center gap-1.5 shadow-sm"
+        >
+          <span class="material-symbols-outlined text-[16px]">account_circle</span>
+          <span>Log in</span>
+        </button>
+
+        <div id="user-profile" class="hidden items-center">
+          <button 
+            id="profile-dropdown-btn"
+            class="w-8 h-8 rounded-full neutral-btn font-semibold text-[13px] flex items-center justify-center shadow-sm"
+          >
+            U
+          </button>
+
+          <div 
+            id="profile-menu" 
+            class="hidden absolute right-0 top-10 w-48 bg-[#181a1f] rounded-2xl p-2 shadow-2xl z-50 border border-white/5"
+          >
+            <div class="px-3 py-2 border-b border-white/10">
+              <p class="text-[13px] font-medium text-white" id="user-display-name">User</p>
+              <p class="text-[11px] text-[#9aa0a6] truncate" id="user-display-email">user@gutiai.com</p>
+            </div>
+            <button 
+              id="logout-btn"
+              class="w-full text-left flex items-center gap-2 px-3 py-2 text-[12px] text-red-400 hover:bg-white/5 rounded-xl mt-1 transition"
+            >
+              <span class="material-symbols-outlined text-[16px]">logout</span>
+              Log out
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Chat Canvas -->
+    <div id="chat-canvas" class="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-5 z-10">
+      <div class="h-full flex flex-col items-center justify-center text-center text-[#8e918f] space-y-2 select-none" id="empty-state">
+        <span class="material-symbols-outlined text-4xl text-[#3c4043]">smart_toy</span>
+        <p class="text-sm">What would you like to explore today?</p>
+      </div>
+    </div>
+
+    <!-- Hidden Native File Inputs -->
+    <input type="file" id="media-file-input" accept="image/*,video/*" multiple class="hidden" />
+    <input type="file" id="doc-file-input" accept="*/*" multiple class="hidden" />
+
+    <!-- Prompt Input Container -->
+    <div class="p-3 sm:p-5 z-10 w-full relative">
+      
+      <!-- Upload Menu -->
+      <div 
+        id="upload-menu" 
+        class="hidden absolute left-4 sm:left-6 bottom-20 sm:bottom-24 bg-[#181a20] rounded-2xl p-1.5 shadow-2xl z-30 w-52 border border-white/5"
+      >
+        <button id="upload-media-btn" class="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[#e3e3e3] hover:bg-white/5 rounded-xl transition text-left">
+          <span class="material-symbols-outlined text-[18px] text-[#9aa0a6]">perm_media</span>
+          <span>Photos & Videos</span>
+        </button>
+        <button id="upload-doc-btn" class="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[#e3e3e3] hover:bg-white/5 rounded-xl transition text-left">
+          <span class="material-symbols-outlined text-[18px] text-[#9aa0a6]">upload_file</span>
+          <span>Upload files</span>
+        </button>
+      </div>
+
+      <!-- Rotating 5-Color Glowing Border -->
+      <div class="rotating-border-wrapper shadow-2xl">
+        <div class="rotating-conic-glow"></div>
+        <div class="rotating-conic-sharp"></div>
+
+        <div class="relative bg-[#131419] rounded-[24px] p-3 sm:p-4 z-10 w-full">
+          <div id="file-previews" class="hidden flex-wrap gap-2 mb-2.5 max-h-36 overflow-y-auto pt-1"></div>
+
+          <textarea 
+            id="prompt-input"
+            rows="1"
+            placeholder="Ask a question..." 
+            class="w-full bg-transparent text-[#e3e3e3] placeholder-[#8e918f] text-[15px] sm:text-[16px] outline-none mb-3 resize-none max-h-32"
+          ></textarea>
+
+          <div class="flex items-center justify-between pt-1">
+            <div class="flex items-center gap-2">
+              <button id="add-file-btn" type="button" title="Add files" class="w-8 h-8 rounded-full flex items-center justify-center neutral-btn shadow-sm">
+                <span class="material-symbols-outlined text-[18px]">add</span>
+              </button>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <div id="listening-badge" class="hidden flex items-center gap-1.5 px-3 py-1 neutral-btn rounded-full text-[11px]">
+                <span class="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse"></span>
+                <span class="font-medium text-white">Listening</span>
+                <span id="recording-timer" class="font-mono text-white/80 font-semibold">0s</span>
+              </div>
+
+              <button id="mic-btn" type="button" title="Voice Input" class="w-8 h-8 rounded-full flex items-center justify-center neutral-btn shadow-sm relative">
+                <span id="mic-icon" class="material-symbols-outlined text-[17px]">mic</span>
+                <span id="recording-pulse-dot" class="hidden absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-400 animate-ping"></span>
+              </button>
+              
+              <button id="run-btn" disabled class="px-4 py-1.5 bg-[#1b1c22] text-[#5f6368] text-[13px] font-semibold rounded-xl cursor-not-allowed transition-all duration-150">
+                Run
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auth Modal (Sign In, Create Account & OTP System) -->
+    <div id="auth-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+      <div class="w-full max-w-[370px] bg-[#17181e] rounded-3xl p-6 shadow-2xl relative border border-white/5">
+        <button id="close-modal-btn" class="absolute top-4 right-4 w-7 h-7 flex items-center justify-center rounded-full bg-white/5 text-[#9aa0a6] hover:text-white transition">
+          <span class="material-symbols-outlined text-[18px]">close</span>
+        </button>
+
+        <div class="text-center mb-5">
+          <div class="w-11 h-11 mx-auto mb-3 neutral-btn rounded-2xl flex items-center justify-center text-white">
+            <span id="modal-icon" class="material-symbols-outlined text-[24px]">lock</span>
+          </div>
+          <h2 id="modal-title" class="text-[18px] font-semibold text-white">Sign in to GutiAi</h2>
+          <p id="modal-subtitle" class="text-[12px] text-[#9aa0a6] mt-1">Sign in to access all AI features</p>
+        </div>
+
+        <!-- Notification Banner / OTP Display Alert -->
+        <div id="auth-alert" class="hidden mb-3.5 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[12px] rounded-xl text-center"></div>
+
+        <!-- 1. SIGN IN VIEW -->
+        <div id="signin-view">
+          <form id="login-form" class="space-y-3">
+            <div>
+              <input id="login-email" type="email" required placeholder="Email address" class="w-full bg-[#121316] text-[13px] rounded-xl px-3.5 py-2.5 text-white placeholder-[#75777a] border border-white/5" />
+            </div>
+            <div>
+              <input id="login-password" type="password" required placeholder="Password" class="w-full bg-[#121316] text-[13px] rounded-xl px-3.5 py-2.5 text-white placeholder-[#75777a] border border-white/5" />
+            </div>
+            <button type="submit" class="w-full py-2.5 bg-white text-black font-semibold rounded-xl text-[13px] hover:bg-gray-200 transition mt-2">
+              Sign In
+            </button>
+          </form>
+          <div class="mt-4 text-center text-[12px] text-[#9aa0a6]">
+            Don't have an account? 
+            <button id="goto-signup-btn" class="text-white font-medium hover:underline ml-1">Create account</button>
+          </div>
+        </div>
+
+        <!-- 2. CREATE ACCOUNT (SIGN UP) VIEW -->
+        <div id="signup-view" class="hidden">
+          <form id="signup-form" class="space-y-3">
+            <div>
+              <input id="signup-name" type="text" required placeholder="Full Name" class="w-full bg-[#121316] text-[13px] rounded-xl px-3.5 py-2.5 text-white placeholder-[#75777a] border border-white/5" />
+            </div>
+            <div>
+              <input id="signup-email" type="email" required placeholder="Email address" class="w-full bg-[#121316] text-[13px] rounded-xl px-3.5 py-2.5 text-white placeholder-[#75777a] border border-white/5" />
+            </div>
+            <div>
+              <input id="signup-password" type="password" required minlength="6" placeholder="Create Password" class="w-full bg-[#121316] text-[13px] rounded-xl px-3.5 py-2.5 text-white placeholder-[#75777a] border border-white/5" />
+            </div>
+            <button type="submit" class="w-full py-2.5 bg-white text-black font-semibold rounded-xl text-[13px] hover:bg-gray-200 transition mt-2">
+              Get Verification Code
+            </button>
+          </form>
+          <div class="mt-4 text-center text-[12px] text-[#9aa0a6]">
+            Already have an account? 
+            <button id="goto-signin-btn" class="text-white font-medium hover:underline ml-1">Sign in</button>
+          </div>
+        </div>
+
+        <!-- 3. OTP VERIFICATION VIEW -->
+        <div id="otp-view" class="hidden">
+          <p class="text-[12px] text-center text-[#9aa0a6] mb-4">
+            Enter the 6-digit code sent to <br><span id="otp-target-email" class="text-white font-medium"></span>
+          </p>
+
+          <form id="otp-form" class="space-y-4">
+            <div class="flex justify-between gap-1.5">
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+              <input type="text" maxlength="1" class="otp-digit w-11 h-12 text-center text-[18px] font-bold bg-[#121316] text-white rounded-xl border border-white/10" />
+            </div>
+
+            <button type="submit" class="w-full py-2.5 bg-white text-black font-semibold rounded-xl text-[13px] hover:bg-gray-200 transition">
+              Verify & Register
+            </button>
+          </form>
+
+          <div class="mt-4 flex items-center justify-between text-[12px] text-[#9aa0a6] px-1">
+            <button id="resend-otp-btn" class="hover:text-white transition">Resend Code</button>
+            <button id="cancel-otp-btn" class="hover:text-white transition">Change Email</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- XKIRO API CONFIGURATION (NO PUTER) ---
+    const XKIRO_API_KEY = "sk-xt-ade0b61c4b191d01fd80b003eeff6ade5bfc774538bb64af";
+    const XKIRO_BASE_URL = "https://api.xkiro.com/v1/chat/completions";
+    const XKIRO_MODEL = "qwen/qwen3.8-omni-flash:free";
+
+    // Chat and Input State
+    let chatHistory = [];
+    let attachedFiles = [];
+    let pendingUserData = null;
+    let generatedOtp = null;
+
+    // DOM References
+    const promptInput = document.getElementById('prompt-input');
+    const runBtn = document.getElementById('run-btn');
+    const chatCanvas = document.getElementById('chat-canvas');
+    const emptyState = document.getElementById('empty-state');
+    const addFileBtn = document.getElementById('add-file-btn');
+    const uploadMenu = document.getElementById('upload-menu');
+    const mediaFileInput = document.getElementById('media-file-input');
+    const docFileInput = document.getElementById('doc-file-input');
+    const filePreviews = document.getElementById('file-previews');
+    const micBtn = document.getElementById('mic-btn');
+    const listeningBadge = document.getElementById('listening-badge');
+    const recordingTimer = document.getElementById('recording-timer');
+    const recordingPulseDot = document.getElementById('recording-pulse-dot');
+    
+    // Auth DOM References
+    const openLoginBtn = document.getElementById('open-login-btn');
+    const authModal = document.getElementById('auth-modal');
+    const closeModalBtn = document.getElementById('close-modal-btn');
+    const modalIcon = document.getElementById('modal-icon');
+    const modalTitle = document.getElementById('modal-title');
+    const modalSubtitle = document.getElementById('modal-subtitle');
+    const authAlert = document.getElementById('auth-alert');
+    
+    const signinView = document.getElementById('signin-view');
+    const signupView = document.getElementById('signup-view');
+    const otpView = document.getElementById('otp-view');
+
+    const gotoSignupBtn = document.getElementById('goto-signup-btn');
+    const gotoSigninBtn = document.getElementById('goto-signin-btn');
+    const resendOtpBtn = document.getElementById('resend-otp-btn');
+    const cancelOtpBtn = document.getElementById('cancel-otp-btn');
+
+    const loginForm = document.getElementById('login-form');
+    const signupForm = document.getElementById('signup-form');
+    const otpForm = document.getElementById('otp-form');
+    const otpDigits = document.querySelectorAll('.otp-digit');
+    const otpTargetEmail = document.getElementById('otp-target-email');
+
+    const userProfile = document.getElementById('user-profile');
+    const profileDropdownBtn = document.getElementById('profile-dropdown-btn');
+    const profileMenu = document.getElementById('profile-menu');
+    const logoutBtn = document.getElementById('logout-btn');
+    const userDisplayName = document.getElementById('user-display-name');
+    const userDisplayEmail = document.getElementById('user-display-email');
+
+    // Local account storage
+    function getUsers() {
+      return JSON.parse(localStorage.getItem('gutiai_users') || '[]');
+    }
+
+    function saveUser(user) {
+      const users = getUsers();
+      users.push(user);
+      localStorage.setItem('gutiai_users', JSON.stringify(users));
+    }
+
+    // Switch between Sign In, Sign Up, and OTP view
+    function switchAuthView(view) {
+      authAlert.classList.add('hidden');
+      signinView.classList.add('hidden');
+      signupView.classList.add('hidden');
+      otpView.classList.add('hidden');
+
+      if (view === 'signin') {
+        signinView.classList.remove('hidden');
+        modalIcon.textContent = 'lock';
+        modalTitle.textContent = 'Sign in to GutiAi';
+        modalSubtitle.textContent = 'Sign in to access all AI features';
+      } else if (view === 'signup') {
+        signupView.classList.remove('hidden');
+        modalIcon.textContent = 'person_add';
+        modalTitle.textContent = 'Create an Account';
+        modalSubtitle.textContent = 'Get started with your free GutiAi account';
+      } else if (view === 'otp') {
+        otpView.classList.remove('hidden');
+        modalIcon.textContent = 'mark_email_read';
+        modalTitle.textContent = 'Verification Code';
+        modalSubtitle.textContent = 'Enter the code to verify your account';
+        otpDigits[0].focus();
+      }
+    }
+
+    gotoSignupBtn.addEventListener('click', () => switchAuthView('signup'));
+    gotoSigninBtn.addEventListener('click', () => switchAuthView('signin'));
+    cancelOtpBtn.addEventListener('click', () => switchAuthView('signup'));
+
+    // Handle Sign Up & Trigger OTP
+    signupForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = document.getElementById('signup-name').value.trim();
+      const email = document.getElementById('signup-email').value.trim();
+      const password = document.getElementById('signup-password').value;
+
+      const users = getUsers();
+      if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+        authAlert.textContent = "An account with this email already exists.";
+        authAlert.className = "mb-3.5 px-3 py-2 bg-red-500/10 border border-red-500/20 text-red-400 text-[12px] rounded-xl text-center";
+        authAlert.classList.remove('hidden');
+        return;
+      }
+
+      pendingUserData = { name, email, password };
+      sendVerificationOtp(email);
+    });
+
+    function sendVerificationOtp(email) {
+      generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      otpTargetEmail.textContent = email;
+
+      authAlert.innerHTML = `Your verification code is: <strong class="text-white tracking-widest text-[14px]">${generatedOtp}</strong>`;
+      authAlert.className = "mb-3.5 px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[12px] rounded-xl text-center";
+      authAlert.classList.remove('hidden');
+
+      switchAuthView('otp');
+      otpDigits.forEach(input => input.value = '');
+    }
+
+    resendOtpBtn.addEventListener('click', () => {
+      if (pendingUserData) {
+        sendVerificationOtp(pendingUserData.email);
+      }
+    });
+
+    // Auto-advance OTP Inputs
+    otpDigits.forEach((input, idx) => {
+      input.addEventListener('input', (e) => {
+        if (e.target.value.length === 1 && idx < otpDigits.length - 1) {
+          otpDigits[idx + 1].focus();
+        }
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Backspace' && !e.target.value && idx > 0) {
+          otpDigits[idx - 1].focus();
+        }
+      });
+    });
+
+    // OTP Verification Submit
+    otpForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const enteredOtp = Array.from(otpDigits).map(input => input.value).join('');
+
+      if (enteredOtp !== generatedOtp) {
+        authAlert.textContent = "Invalid code. Please check and try again.";
+        authAlert.className = "mb-3.5 px-3 py-2 bg-red-500/10 border border-red-500/20 text-red-400 text-[12px] rounded-xl text-center";
+        authAlert.classList.remove('hidden');
+        return;
+      }
+
+      saveUser(pendingUserData);
+      loginUser(pendingUserData.name, pendingUserData.email);
+      signupForm.reset();
+      otpForm.reset();
+      pendingUserData = null;
+      generatedOtp = null;
+    });
+
+    // Handle Login Submit
+    loginForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const email = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-password').value;
+
+      const users = getUsers();
+      const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
+
+      if (!user && users.length > 0) {
+        authAlert.textContent = "Incorrect email or password.";
+        authAlert.className = "mb-3.5 px-3 py-2 bg-red-500/10 border border-red-500/20 text-red-400 text-[12px] rounded-xl text-center";
+        authAlert.classList.remove('hidden');
+        return;
+      }
+
+      const name = user ? user.name : email.split('@')[0];
+      loginUser(name, email);
+    });
+
+    function loginUser(name, email) {
+      openLoginBtn.classList.add('hidden');
+      userProfile.classList.remove('hidden');
+      profileDropdownBtn.textContent = name.charAt(0).toUpperCase();
+      userDisplayName.textContent = name;
+      userDisplayEmail.textContent = email;
+      authModal.classList.add('hidden');
+    }
+
+    openLoginBtn.addEventListener('click', () => {
+      switchAuthView('signin');
+      authModal.classList.remove('hidden');
+    });
+
+    closeModalBtn.addEventListener('click', () => authModal.classList.add('hidden'));
+
+    profileDropdownBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      profileMenu.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => profileMenu.classList.add('hidden'));
+
+    logoutBtn.addEventListener('click', () => {
+      userProfile.classList.add('hidden');
+      openLoginBtn.classList.remove('hidden');
+      profileMenu.classList.add('hidden');
+    });
+
+    // Auto-grow textarea & validation
+    promptInput.addEventListener('input', () => {
+      promptInput.style.height = 'auto';
+      promptInput.style.height = (promptInput.scrollHeight) + 'px';
+      
+      const hasContent = promptInput.value.trim().length > 0 || attachedFiles.length > 0;
+      runBtn.disabled = !hasContent;
+      if (hasContent) {
+        runBtn.className = "px-4 py-1.5 bg-white text-black text-[13px] font-semibold rounded-xl cursor-pointer hover:bg-gray-200 transition-all duration-150";
+      } else {
+        runBtn.className = "px-4 py-1.5 bg-[#1b1c22] text-[#5f6368] text-[13px] font-semibold rounded-xl cursor-not-allowed transition-all duration-150";
+      }
+    });
+
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (!runBtn.disabled) handleSend();
+      }
+    });
+
+    runBtn.addEventListener('click', handleSend);
+
+    // Call xkiro API
+    async function queryXkiro(messages) {
+      const response = await fetch(XKIRO_BASE_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${XKIRO_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: XKIRO_MODEL,
+          messages: messages
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`xkiro error ${response.status}: ${errorText || response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.choices[0].message.content;
+    }
+
+    // Send logic (Direct xkiro without Puter)
+    async function handleSend() {
+      const text = promptInput.value.trim();
+      if (!text && attachedFiles.length === 0) return;
+
+      if (emptyState) emptyState.style.display = 'none';
+
+      let userPrompt = text;
+      if (attachedFiles.length > 0) {
+        const fileNames = attachedFiles.map(f => f.name).join(", ");
+        userPrompt += `\n\n[Attached files: ${fileNames}]`;
+      }
+
+      appendMessage('user', userPrompt);
+      chatHistory.push({ role: "user", content: userPrompt });
+
+      promptInput.value = '';
+      promptInput.style.height = 'auto';
+      attachedFiles = [];
+      renderFilePreviews();
+      runBtn.disabled = true;
+      runBtn.className = "px-4 py-1.5 bg-[#1b1c22] text-[#5f6368] text-[13px] font-semibold rounded-xl cursor-not-allowed transition-all duration-150";
+
+      const thinkingBubble = appendThinkingMessage();
+
+      try {
+        const assistantReply = await queryXkiro(chatHistory);
+        replaceThinkingWithMessage(thinkingBubble, assistantReply);
+        chatHistory.push({ role: "assistant", content: assistantReply });
+      } catch (err) {
+        console.error("xkiro API Error:", err);
+        replaceThinkingWithMessage(thinkingBubble, `**Request failed:** ${err.message || 'Unable to connect to xkiro.com API. Please check your network connection.'}`);
+      }
+    }
+
+    function appendMessage(role, content) {
+      const wrapper = document.createElement('div');
+      wrapper.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'} w-full`;
+
+      const bubble = document.createElement('div');
+      if (role === 'user') {
+        bubble.className = "max-w-[85%] sm:max-w-[75%] bg-[#1e2027] text-white px-4 py-2.5 rounded-2xl text-[14.5px] leading-relaxed break-words border border-white/5";
+        bubble.textContent = content;
+      } else {
+        bubble.className = "max-w-full w-full ai-output text-[#e3e3e3] px-2 py-1 text-[14.5px]";
+        bubble.innerHTML = marked.parse(content);
+      }
+
+      wrapper.appendChild(bubble);
+      chatCanvas.appendChild(wrapper);
+      chatCanvas.scrollTop = chatCanvas.scrollHeight;
+      return wrapper;
+    }
+
+    function appendThinkingMessage() {
+      const wrapper = document.createElement('div');
+      wrapper.className = "flex justify-start w-full";
+
+      const bubble = document.createElement('div');
+      bubble.className = "px-2 py-1 flex items-center gap-2";
+      bubble.innerHTML = `
+        <span class="material-symbols-outlined text-[18px] text-[#118ab2] animate-spin">progress_activity</span>
+        <span class="thinking-shimmer text-[14px] font-medium">Thinking...</span>
+      `;
+
+      wrapper.appendChild(bubble);
+      chatCanvas.appendChild(wrapper);
+      chatCanvas.scrollTop = chatCanvas.scrollHeight;
+      return wrapper;
+    }
+
+    function replaceThinkingWithMessage(thinkingWrapper, content) {
+      thinkingWrapper.innerHTML = '';
+      const bubble = document.createElement('div');
+      bubble.className = "max-w-full w-full ai-output text-[#e3e3e3] px-2 py-1 text-[14.5px]";
+      bubble.innerHTML = marked.parse(content);
+      thinkingWrapper.appendChild(bubble);
+      chatCanvas.scrollTop = chatCanvas.scrollHeight;
+    }
+
+    // Attachments Handling
+    addFileBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      uploadMenu.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', () => uploadMenu.classList.add('hidden'));
+
+    document.getElementById('upload-media-btn').addEventListener('click', () => {
+      mediaFileInput.click();
+      uploadMenu.classList.add('hidden');
+    });
+
+    document.getElementById('upload-doc-btn').addEventListener('click', () => {
+      docFileInput.click();
+      uploadMenu.classList.add('hidden');
+    });
+
+    function handleFileSelect(e) {
+      const files = Array.from(e.target.files);
+      files.forEach(f => attachedFiles.push(f));
+      renderFilePreviews();
+      promptInput.dispatchEvent(new Event('input'));
+    }
+
+    mediaFileInput.addEventListener('change', handleFileSelect);
+    docFileInput.addEventListener('change', handleFileSelect);
+
+    function renderFilePreviews() {
+      filePreviews.innerHTML = '';
+      if (attachedFiles.length === 0) {
+        filePreviews.classList.add('hidden');
+        return;
+      }
+      filePreviews.classList.remove('hidden');
+
+      attachedFiles.forEach((file, index) => {
+        const item = document.createElement('div');
+        item.className = "flex items-center gap-1.5 bg-[#1b1d24] border border-white/10 px-2.5 py-1 rounded-lg text-[12px] text-white";
+        item.innerHTML = `
+          <span class="material-symbols-outlined text-[14px] text-gray-400">attach_file</span>
+          <span class="max-w-[120px] truncate">${file.name}</span>
+          <button type="button" class="ml-1 text-gray-400 hover:text-white" onclick="removeFile(${index})">
+            <span class="material-symbols-outlined text-[14px]">close</span>
+          </button>
+        `;
+        filePreviews.appendChild(item);
+      });
+    }
+
+    window.removeFile = function(index) {
+      attachedFiles.splice(index, 1);
+      renderFilePreviews();
+      promptInput.dispatchEvent(new Event('input'));
+    };
+
+    // Voice recognition (Web Speech API)
+    let recognition = null;
+    let isRecording = false;
+    let timerInterval = null;
+    let seconds = 0;
+
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+
+      recognition.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          transcript += event.results[i][0].transcript;
+        }
+        promptInput.value = transcript;
+        promptInput.dispatchEvent(new Event('input'));
+      };
+
+      recognition.onerror = () => stopRecording();
+      recognition.onend = () => stopRecording();
+    }
+
+    micBtn.addEventListener('click', () => {
+      if (!recognition) {
+        alert("Speech Recognition is not supported by your browser.");
+        return;
+      }
+      if (!isRecording) startRecording();
+      else stopRecording();
+    });
+
+    function startRecording() {
+      try {
+        recognition.start();
+        isRecording = true;
+        seconds = 0;
+        listeningBadge.classList.remove('hidden');
+        recordingPulseDot.classList.remove('hidden');
+        timerInterval = setInterval(() => {
+          seconds++;
+          recordingTimer.textContent = `${seconds}s`;
+        }, 1000);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function stopRecording() {
+      if (!isRecording) return;
+      isRecording = false;
+      try { recognition.stop(); } catch(e){}
+      clearInterval(timerInterval);
+      listeningBadge.classList.add('hidden');
+      recordingPulseDot.classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
+Skip to main content
+spark

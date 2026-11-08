@@ -1,0 +1,50 @@
+{
+  "entities": {
+    "UserChatSession": {
+      "title": "UserChatSession",
+      "description": "A persistent chat session belonging to an authenticated user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique session ID."
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the owner."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Title of the chat session."
+        },
+        "chatMode": {
+          "type": "string",
+          "enum": ["chat", "photo", "video"],
+          "description": "Active generation mode for this session."
+        },
+        "messages": {
+          "type": "string",
+          "description": "JSON serialized messages in the session."
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Creation timestamp in milliseconds."
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Last updated timestamp in milliseconds."
+        }
+      },
+      "required": ["id", "userId", "title", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": {
+        "$ref": "#/entities/UserChatSession"
+      },
+      "description": "User private chat sessions stored permanently in Firestore."
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "GutiAi Playground",
+  "description": "GutiAi Playground - Next-generation AI Chat, voice input, and media analysis playground.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
