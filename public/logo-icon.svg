@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Top Sphere Radial/Linear Gradient -->
+    <linearGradient id="bloopOrb" x1="15%" y1="85%" x2="85%" y2="15%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="25%" stop-color="#06b6d4" />
+      <stop offset="60%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+
+    <!-- Left Wing Gradient -->
+    <linearGradient id="bloopLeftWing" x1="0%" y1="30%" x2="100%" y2="85%">
+      <stop offset="0%" stop-color="#1d4ed8" />
+      <stop offset="25%" stop-color="#2563eb" />
+      <stop offset="55%" stop-color="#0284c7" />
+      <stop offset="80%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+
+    <!-- Right Wing Gradient -->
+    <linearGradient id="bloopRightWing" x1="0%" y1="85%" x2="100%" y2="15%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="20%" stop-color="#10b981" />
+      <stop offset="45%" stop-color="#0284c7" />
+      <stop offset="70%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+
+    <!-- Subtle Vein Cut Gradient -->
+    <linearGradient id="veinArc" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85" />
+      <stop offset="70%" stop-color="#ffffff" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Centered Emblem -->
+  <g transform="translate(0, 40)">
+    <!-- Top Sphere -->
+    <circle cx="256" cy="116" r="34" fill="url(#bloopOrb)" />
+
+    <!-- Left Leaf Wing -->
+    <path d="M 248 296 C 248 226 186 138 128 144 C 118 222 162 290 248 296 Z" fill="url(#bloopLeftWing)" />
+    <!-- Left Leaf Vein -->
+    <path d="M 246 290 Q 192 246 154 164" fill="none" stroke="url(#veinArc)" stroke-width="4.5" stroke-linecap="round" />
+
+    <!-- Right Leaf Wing -->
+    <path d="M 264 296 C 264 226 326 138 384 144 C 394 222 350 290 264 296 Z" fill="url(#bloopRightWing)" />
+    <!-- Right Leaf Vein -->
+    <path d="M 266 290 Q 320 246 358 164" fill="none" stroke="url(#veinArc)" stroke-width="4.5" stroke-linecap="round" />
+  </g>
+</svg>

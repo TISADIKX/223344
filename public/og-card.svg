@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="ogBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0c10" />
+      <stop offset="100%" stop-color="#141721" />
+    </linearGradient>
+    <linearGradient id="ogOrb" x1="15%" y1="85%" x2="85%" y2="15%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="25%" stop-color="#06b6d4" />
+      <stop offset="60%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+    <linearGradient id="ogLeft" x1="0%" y1="30%" x2="100%" y2="85%">
+      <stop offset="0%" stop-color="#1d4ed8" />
+      <stop offset="25%" stop-color="#2563eb" />
+      <stop offset="55%" stop-color="#0284c7" />
+      <stop offset="80%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <linearGradient id="ogRight" x1="0%" y1="85%" x2="100%" y2="15%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="20%" stop-color="#10b981" />
+      <stop offset="45%" stop-color="#0284c7" />
+      <stop offset="70%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+    <linearGradient id="ogVein" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85" />
+      <stop offset="70%" stop-color="#ffffff" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0" />
+    </linearGradient>
+    <radialGradient id="ogGlow" cx="50%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.18" />
+      <stop offset="60%" stop-color="#7c3aed" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#ogBg)" />
+  <circle cx="600" cy="270" r="420" fill="url(#ogGlow)" />
+
+  <g transform="translate(600, 180) scale(1.15)">
+    <circle cx="0" cy="-68" r="23" fill="url(#ogOrb)" />
+    <path d="M -5 18 C -5 -30 -47 -90 -86 -85 C -93 -33 -63 14 -5 18 Z" fill="url(#ogLeft)" />
+    <path d="M -6 14 Q -42 -15 -68 -71" fill="none" stroke="url(#ogVein)" stroke-width="3" stroke-linecap="round" />
+    <path d="M 5 18 C 5 -30 47 -90 86 -85 C 93 -33 63 14 5 18 Z" fill="url(#ogRight)" />
+    <path d="M 6 14 Q 42 -15 68 -71" fill="none" stroke="url(#ogVein)" stroke-width="3" stroke-linecap="round" />
+  </g>
+
+  <text x="600" y="360" text-anchor="middle" font-family="sans-serif" font-weight="900" font-size="78" letter-spacing="-2" fill="#ffffff">BloopX</text>
+  <text x="600" y="420" text-anchor="middle" font-family="sans-serif" font-weight="500" font-size="28" letter-spacing="0.2" fill="#94a3b8">Next-Generation AI Chat, Photo &amp; Video Playground</text>
+
+  <g transform="translate(600, 480)">
+    <rect x="-170" y="-18" width="340" height="36" rx="18" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+    <text x="0" y="6" text-anchor="middle" font-family="sans-serif" font-weight="600" font-size="14" fill="#38bdf8" letter-spacing="1">ULTRA-FAST | REALISTIC | CLOUD SYNC</text>
+  </g>
+</svg>

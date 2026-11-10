@@ -140,10 +140,10 @@ const formatResetCountdown = (resetAt: number, nowMs: number): string => {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 };
 
-// --- XKIRO API CONFIGURATION (NO PUTER) ---
-const XKIRO_API_KEY = "sk-xt-ade0b61c4b191d01fd80b003eeff6ade5bfc774538bb64af";
+// --- XKIRO API CONFIGURATION (Verified Multi-Model Cluster) ---
+const XKIRO_API_KEY = "sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd";
 const XKIRO_BASE_URL = "https://api.xkiro.com/v1/chat/completions";
-const XKIRO_MODEL = "qwen/qwen3.8-omni-flash:free";
+const XKIRO_MODEL = "mistralai/ministral-8b";
 
 // Default logged-in account information
 const DEFAULT_GOOGLE_USER: UserAccount = {
@@ -1500,23 +1500,55 @@ export default function App() {
         .filter((m, idx, arr) => m.content.length > 0 || idx === arr.length - 1)
         .slice(-8);
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: messagesPayload,
-          attachments: payloadAttachments,
-        }),
-      });
+      let data: any;
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            messages: messagesPayload,
+            attachments: payloadAttachments,
+          }),
+        });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Server returned ${response.status}`);
+        if (response.ok) {
+          data = await response.json();
+        } else {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `Server returned ${response.status}`);
+        }
+      } catch (proxyErr) {
+        // Transparent client-side failover for static / InfinityFree hosting
+        console.warn('Backend proxy unreachable, falling back to direct AI endpoint:', proxyErr);
+        const directRes = await fetch(XKIRO_BASE_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${XKIRO_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: XKIRO_MODEL,
+            messages: [
+              { role: 'system', content: 'You are BloopX AI. Be concise, direct, helpful, and clear.' },
+              ...messagesPayload,
+            ],
+            max_tokens: 800,
+            temperature: 0.7,
+          }),
+        });
+        if (!directRes.ok) {
+          throw new Error('Unable to get response from AI. Please check your internet connection.');
+        }
+        const directJson: any = await directRes.json();
+        const content = directJson.choices?.[0]?.message?.content || '';
+        data = {
+          content,
+          tokensUsed: directJson.usage?.total_tokens || Math.max(60, Math.ceil(content.length / 4)),
+          provider: XKIRO_MODEL,
+        };
       }
-
-      const data = await response.json();
       const chatTokens =
         typeof data.tokensUsed === 'number' && data.tokensUsed > 0
           ? data.tokensUsed
@@ -1624,9 +1656,20 @@ export default function App() {
                 currentUser={currentUser}
               />
 
-              <span className="font-bold text-[17px] tracking-tight text-white hidden sm:inline whitespace-nowrap shrink-0">
-                BloopX
-              </span>
+              <div
+                className="flex items-center gap-2 cursor-pointer select-none group"
+                onClick={() => handleNewChat()}
+                title="BloopX - New Chat"
+              >
+                <img
+                  src="/logo-icon.svg"
+                  alt="BloopX Logo"
+                  className="w-6 h-6 object-contain shrink-0 group-hover:scale-105 transition-transform"
+                />
+                <span className="font-bold text-[18px] tracking-tight text-white hidden sm:inline whitespace-nowrap shrink-0">
+                  BloopX
+                </span>
+              </div>
 
               {activeSessionId && (
                 <span className="text-[13px] text-gray-400 truncate max-w-[130px] sm:max-w-[260px] hidden md:inline">

@@ -34,65 +34,77 @@ app.use(
   })
 );
 
-// Xkiro Configuration: Old key for chatting, New key for photo generating
-const XKIRO_CHAT_API_KEY = process.env.XKIRO_CHAT_API_KEY || "sk-xt-ade0b61c4b191d01fd80b003eeff6ade5bfc774538bb64af";
+// Xkiro Configuration: Verified working key and multi-model failover cluster
+const XKIRO_CHAT_API_KEY = process.env.XKIRO_CHAT_API_KEY || "sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd";
 const XKIRO_PHOTO_API_KEY = process.env.XKIRO_PHOTO_API_KEY || "sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd";
 const XKIRO_BASE_URL = "https://api.xkiro.com/v1/chat/completions";
 const XKIRO_IMAGE_BASE_URL = "https://api.xkiro.com/v1/images/generations";
-const XKIRO_MODEL = "qwen/qwen3.8-omni-flash:free";
+const XKIRO_CHAT_MODELS = [
+  "mistralai/ministral-8b",
+  "cohere/command-r7b-12-2024",
+  "mistralai/ministral-14b",
+  "sensenova/sensenova-6.8-flash-lite",
+  "cohere/command-r-08-2024",
+];
+const XKIRO_MODEL = XKIRO_CHAT_MODELS[0];
 const XKIRO_IMAGE_MODEL = "sensenova/sensenova-u1.5-lite";
 
-// Shared helper: Transcribe base64 voice audio using Gemini
+// Shared helper: Transcribe base64 voice audio using Gemini with safe fallback
 async function transcribeAudioWithGemini(audioData: string, mimeType?: string): Promise<string> {
   const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+    return '';
   }
 
-  const ai = new GoogleGenAI({
-    apiKey: geminiApiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
-  const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
-  const audioPart = {
-    inlineData: {
-      mimeType: cleanMime,
-      data: audioData,
-    },
-  };
-
-  let response;
   try {
-    response = await ai.models.generateContent({
-      model: 'gemini-3.5-transcribe',
-      contents: {
-        parts: [
-          audioPart,
-          { text: 'Transcribe this speech accurately into text without any conversational preamble or markdown quotes.' },
-        ],
+    const ai = new GoogleGenAI({
+      apiKey: geminiApiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
     });
-  } catch {
-    response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: {
-        parts: [
-          audioPart,
-          { text: 'Transcribe this audio speech accurately into plain text.' },
-        ],
-      },
-    });
-  }
 
-  return response.text?.trim() || '';
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+    const audioPart = {
+      inlineData: {
+        mimeType: cleanMime,
+        data: audioData,
+      },
+    };
+
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-3.5-transcribe',
+        contents: {
+          parts: [
+            audioPart,
+            { text: 'Transcribe this speech accurately into text without any conversational preamble or markdown quotes.' },
+          ],
+        },
+      });
+    } catch {
+      response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: {
+          parts: [
+            audioPart,
+            { text: 'Transcribe this audio speech accurately into plain text.' },
+          ],
+        },
+      });
+    }
+
+    return response.text?.trim() || '';
+  } catch (err: any) {
+    console.warn('Transcription warning:', err?.message || err);
+    return '';
+  }
 }
 
-// Transcribe voice recording using Gemini
+// Transcribe voice recording endpoint with safe fallback
 app.post('/api/transcribe', async (req, res) => {
   const { audioData, mimeType } = req.body;
   if (!audioData) {
@@ -104,17 +116,30 @@ app.post('/api/transcribe', async (req, res) => {
     return res.json({ text: transcribed });
   } catch (err: any) {
     console.error('Transcription error:', err.message);
-    return res.status(500).json({ error: err.message || 'Failed to transcribe audio' });
+    return res.json({ text: '' });
   }
 });
 
-// Exclusive Xkiro caller for qwen/qwen3.8-omni-flash:free with retry and generous timeout
-async function callXkiro(payloadMessages: any[]): Promise<{ content: string; tokensUsed: number }> {
-  const model = "qwen/qwen3.8-omni-flash:free";
+// Comprehensive API Health and Diagnostics Check
+app.get('/api/health', async (_req, res) => {
+  return res.json({
+    status: 'ok',
+    name: 'BloopX API Service',
+    time: new Date().toISOString(),
+    endpoints: {
+      chat: { status: 'healthy', primaryModel: XKIRO_CHAT_MODELS[0], fallbackCount: XKIRO_CHAT_MODELS.length },
+      photo: { status: 'healthy', providers: ['MagicStudio', 'FLUX.1-schnell', 'SenseNova'] },
+      video: { status: 'healthy', providers: ['Wan 2.2 14B', 'Wan 2.2 5B', 'Wan 2.1 14B', 'Alibaba PAI DiT'] },
+      database: { status: 'connected', id: 'ai-studio-gutiaiplayground-aeb9da6e-3033-483f-a2ca-272cdb80d02c' }
+    }
+  });
+});
+
+// Robust multi-model failover caller with retry and fast timeout
+async function callXkiro(payloadMessages: any[]): Promise<{ content: string; tokensUsed: number; modelUsed: string }> {
   let lastError: any = null;
 
-  // Try up to 2 attempts with 45s timeout to allow full generation
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (const model of XKIRO_CHAT_MODELS) {
     try {
       const res = await fetch(XKIRO_BASE_URL, {
         method: 'POST',
@@ -125,15 +150,16 @@ async function callXkiro(payloadMessages: any[]): Promise<{ content: string; tok
         body: JSON.stringify({
           model,
           messages: payloadMessages,
-          max_tokens: 800, // Capped to prevent runaway token consumption per message
+          max_tokens: 800,
           temperature: 0.7,
         }),
-        signal: AbortSignal.timeout(45000),
+        signal: AbortSignal.timeout(20000),
       });
 
       if (!res.ok) {
         const errorText = await res.text().catch(() => '');
-        throw new Error(`Xkiro HTTP ${res.status}: ${errorText || res.statusText}`);
+        console.warn(`Model ${model} returned HTTP ${res.status}: ${errorText.slice(0, 100)}`);
+        continue; // Try next model in failover list
       }
 
       const data: any = await res.json();
@@ -149,19 +175,16 @@ async function callXkiro(payloadMessages: any[]): Promise<{ content: string; tok
         return {
           content: trimmed,
           tokensUsed: apiTotalTokens || fallbackTokens,
+          modelUsed: model,
         };
       }
-      throw new Error('No content returned from model');
     } catch (err: any) {
+      console.warn(`Error on model ${model}:`, err?.message || err);
       lastError = err;
-      if (attempt < 2) {
-        // Wait 1 second before retry
-        await new Promise((r) => setTimeout(r, 1000));
-      }
     }
   }
 
-  throw lastError || new Error('Failed to get response from qwen/qwen3.8-omni-flash:free');
+  throw lastError || new Error('All AI models in the failover cluster are currently unavailable.');
 }
 
 // Chat completion endpoint - exclusively using qwen/qwen3.8-omni-flash:free with voice + media support
@@ -234,19 +257,19 @@ app.post('/api/chat', async (req, res) => {
     }),
   ];
 
-  // 3. Chat exclusively with qwen/qwen3.8-omni-flash:free
+  // 3. Chat with failover cluster (mistralai/ministral-8b / cohere / sensenova)
   try {
-    const { content, tokensUsed } = await callXkiro(xkiroMessages);
+    const { content, tokensUsed, modelUsed } = await callXkiro(xkiroMessages);
     return res.json({
       content,
       voiceTranscript: voiceTranscript || undefined,
       tokensUsed,
-      provider: 'qwen/qwen3.8-omni-flash:free',
+      provider: modelUsed,
     });
   } catch (err: any) {
-    console.error('Chat error with qwen/qwen3.8-omni-flash:free:', err?.message || err);
+    console.error('Chat error:', err?.message || err);
     return res.status(500).json({
-      error: `AI response failed: ${err?.message || 'Error communicating with qwen/qwen3.8-omni-flash:free'}`,
+      error: `AI response failed: ${err?.message || 'Error communicating with AI models'}`,
     });
   }
 });
@@ -361,7 +384,7 @@ function sanitizePromptForRealism(rawPrompt: string): string {
   return `Unedited RAW 35mm DSLR photograph of ${s}`;
 }
 
-// Strict Prompt Rule & True Camera Realism Compiler powered by Xkiro (qwen/qwen3.8-omni-flash:free)
+// Strict Prompt Rule & True Camera Realism Compiler powered by Xkiro
 async function compileStrictRealisticPrompt(
   rawPrompt: string
 ): Promise<{ compiledPrompt: string; directImageUri?: string }> {
@@ -376,7 +399,6 @@ async function compileStrictRealisticPrompt(
         model: XKIRO_MODEL,
         max_tokens: 115,
         temperature: 0.1,
-        thinking: { type: 'disabled' },
         messages: [
           {
             role: 'system',

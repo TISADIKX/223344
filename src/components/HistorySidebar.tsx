@@ -115,10 +115,15 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
       aria-label="Chat history"
       className="absolute left-0 top-10 z-50 w-[264px] sm:w-[284px] max-w-[calc(100vw-2rem)] bg-[#16181f] border border-white/10 rounded-2xl p-2.5 shadow-2xl flex flex-col select-none transition-[transform,opacity] duration-150 origin-top-left"
     >
-      {/* Compact Top Bar with New Button */}
-      <div className="flex items-center justify-between gap-2 px-0.5 pb-2 border-b border-white/[0.08] shrink-0">
-        <button
-          id="sidebar-new-chat-btn"
+      {/* Compact Top Bar with Brand and New Button */}
+      <div className="flex items-center justify-between gap-2 px-1 pb-2 border-b border-white/[0.08] shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <img src="/logo-icon.svg" alt="BloopX" className="w-4.5 h-4.5 object-contain shrink-0" />
+          <span className="text-[13px] font-semibold text-white tracking-tight truncate">History</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            id="sidebar-new-chat-btn"
           type="button"
           onClick={() => {
             onNewChat();
@@ -131,15 +136,16 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
           <span>New</span>
         </button>
 
-        <button
-          type="button"
-          onClick={onClose}
-          className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0"
-          title="Close"
-          aria-label="Close history"
-        >
-          <span className="material-symbols-outlined text-[16px]">close</span>
-        </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0"
+            title="Close"
+            aria-label="Close history"
+          >
+            <span className="material-symbols-outlined text-[16px]">close</span>
+          </button>
+        </div>
       </div>
 
       {/* Compact Quick Filter when multiple chats exist */}

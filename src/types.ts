@@ -48,6 +48,8 @@ export interface GeneratedPhoto {
   prompt: string;
   aspectRatio?: PhotoAspectRatio;
   quality?: PhotoQuality;
+  model?: string;
+  provider?: string;
 }
 
 export interface GeneratedVideo {
