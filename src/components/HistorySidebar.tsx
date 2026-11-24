@@ -117,7 +117,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
           {/* Compact Top Bar with Brand and New Button */}
           <div className="flex items-center justify-between gap-2 px-1 pb-2 border-b border-white/[0.08] shrink-0">
             <div className="flex items-center gap-1.5 min-w-0">
-              <img src="/logo-icon.svg" alt="BloopX" className="w-4.5 h-4.5 object-contain shrink-0" />
+              <img src="./logo-icon.svg" alt="BloopX" className="w-4.5 h-4.5 object-contain shrink-0" />
               <span className="text-[13px] font-semibold text-white tracking-tight truncate leading-tight">
                 History
               </span>

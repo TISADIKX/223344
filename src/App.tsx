@@ -669,7 +669,10 @@ export default function App() {
 
           ctx.drawImage(img, 0, 0, targetW, targetH);
           const outMime = 'image/jpeg';
-          const dataUrl = canvas.toDataURL(outMime, 0.88);
+          let dataUrl = canvas.toDataURL(outMime, 0.88);
+          if (dataUrl.length > 2_000_000) {
+            dataUrl = canvas.toDataURL(outMime, 0.74);
+          }
           const base64Data = dataUrl.split(',')[1] || '';
           URL.revokeObjectURL(tempBlob);
           if (!base64Data) throw new Error('Empty canvas output');
@@ -1682,21 +1685,24 @@ export default function App() {
               }),
               signal: AbortSignal.timeout(15000),
             });
-            if (!masterRes.ok) return { url: null, quotaExceeded: false };
+            if (!masterRes.ok) return { url: rawVideoUrl, quotaExceeded: false };
             const masterJson = await masterRes.json();
             if (masterJson?.videoUrl) return { url: masterJson.videoUrl, quotaExceeded: false };
 
-            const masterJobId = masterJson?.jobId;
-            if (!masterJobId) return { url: null, quotaExceeded: false };
+            let masterJobId = masterJson?.jobId;
+            if (!masterJobId) return { url: rawVideoUrl, quotaExceeded: false };
 
             for (let mPoll = 0; mPoll < 95; mPoll++) {
               await new Promise((r) => setTimeout(r, 850));
               try {
                 const mStatusRes = await fetch(`/api/generate-video/status/${masterJobId}`, {
-                  signal: AbortSignal.timeout(8000),
+                  signal: AbortSignal.timeout(15000),
                 });
                 if (!mStatusRes.ok) continue;
                 const mStatusJson = await mStatusRes.json();
+                if (typeof mStatusJson?.nextJobId === 'string' && mStatusJson.nextJobId) {
+                  masterJobId = mStatusJson.nextJobId;
+                }
                 if (typeof mStatusJson?.progress === 'number') {
                   advanceVideoFloor(mStatusJson.progress);
                 }
@@ -1708,7 +1714,7 @@ export default function App() {
                 // Continue polling on transient network hiccup
               }
             }
-            return { url: null, quotaExceeded: false };
+            return { url: rawVideoUrl, quotaExceeded: false };
           } catch {
             return { url: null, quotaExceeded: false };
           }
@@ -1814,20 +1820,23 @@ export default function App() {
               break;
             }
 
-            const jobId = startData?.jobId;
-            if (!jobId) continue;
+            let activeJobId = startData?.jobId;
+            if (!activeJobId) continue;
 
             for (let pollIdx = 0; pollIdx < 240; pollIdx++) {
               await new Promise((r) => setTimeout(r, 950));
               try {
-                const pollRes = await fetch(`/api/generate-video/status/${jobId}`, {
-                  signal: AbortSignal.timeout(10000),
+                const pollRes = await fetch(`/api/generate-video/status/${activeJobId}`, {
+                  signal: AbortSignal.timeout(55000),
                 });
                 if (!pollRes.ok) {
                   if (pollRes.status === 404) break;
                   continue;
                 }
                 const pollData = await pollRes.json();
+                if (typeof pollData?.nextJobId === 'string' && pollData.nextJobId) {
+                  activeJobId = pollData.nextJobId;
+                }
                 if (typeof pollData?.progress === 'number') {
                   advanceVideoFloor(pollData.progress);
                 }

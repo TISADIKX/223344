@@ -72,6 +72,23 @@ let xkiroCatalogCache: { freeModels: Set<string>; dynamicQwen: string[]; fetched
   fetchedAt: 0,
 };
 
+function markXkiroModelCooldown(model: string, status: number): void {
+  const now = Date.now();
+  if (status === 403 || status === 404) {
+    xkiroUnavailableCache.set(model, now + 10 * 60 * 1000);
+  } else if (status === 429 || status === 502 || status === 503 || status === 504) {
+    xkiroUnavailableCache.set(model, now + 90 * 1000);
+  }
+}
+
+function isXkiroModelInCooldown(model: string, now: number = Date.now()): boolean {
+  const blockedUntil = xkiroUnavailableCache.get(model);
+  if (!blockedUntil) return false;
+  if (now < blockedUntil) return true;
+  xkiroUnavailableCache.delete(model);
+  return false;
+}
+
 async function getPrioritizedXkiroModels(hasImages: boolean): Promise<string[]> {
   const now = Date.now();
   if (now - xkiroCatalogCache.fetchedAt > 10 * 60 * 1000) {
@@ -103,8 +120,7 @@ async function getPrioritizedXkiroModels(hasImages: boolean): Promise<string[]> 
   for (const id of combined) {
     if (deduped.includes(id)) continue;
     if (hasCatalog && !xkiroCatalogCache.freeModels.has(id)) continue;
-    const failedAt = xkiroUnavailableCache.get(id);
-    if (failedAt && now - failedAt < 10 * 60 * 1000) continue;
+    if (isXkiroModelInCooldown(id, now)) continue;
     deduped.push(id);
   }
   return deduped.length > 0 ? deduped : baseList;
@@ -249,14 +265,10 @@ async function callXkiroChat(
       });
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        console.warn(`Xkiro model ${model} HTTP ${res.status}: ${errText.slice(0, 120)}`);
         if (res.status === 401) {
           return null;
         }
-        if (res.status === 404 || res.status === 403) {
-          xkiroUnavailableCache.set(model, Date.now());
-        }
+        markXkiroModelCooldown(model, res.status);
         continue;
       }
 
@@ -275,8 +287,8 @@ async function callXkiroChat(
           modelUsed: model,
         };
       }
-    } catch (err: any) {
-      console.warn(`Xkiro error on ${model}:`, err?.message || err);
+    } catch {
+      markXkiroModelCooldown(model, 504);
     }
   }
 
@@ -752,7 +764,10 @@ async function compileStrictRealisticPrompt(
   // 1. Primary: Xkiro SenseNova prompt compiler
   if (XKIRO_API_KEY) {
     const deadline = Date.now() + 4500;
-    for (const model of XKIRO_PHOTO_MODELS) {
+    const now = Date.now();
+    const activePhotoModels = XKIRO_PHOTO_MODELS.filter((m) => !isXkiroModelInCooldown(m, now));
+    const modelsToTry = activePhotoModels.length > 0 ? activePhotoModels : XKIRO_PHOTO_MODELS;
+    for (const model of modelsToTry) {
       const remaining = deadline - Date.now();
       if (remaining < 700) break;
       try {
@@ -776,6 +791,7 @@ async function compileStrictRealisticPrompt(
         });
         if (!xRes.ok) {
           if (xRes.status === 401) break;
+          markXkiroModelCooldown(model, xRes.status);
           continue;
         }
         const xData: any = await xRes.json();
@@ -783,7 +799,7 @@ async function compileStrictRealisticPrompt(
         const compiled = cleanCompiledCameraPrompt(content);
         if (compiled) return { compiledPrompt: compiled };
       } catch {
-        // Fall through to next Xkiro SenseNova/backup model or secondary prompt compiler
+        markXkiroModelCooldown(model, 504);
       }
     }
   }
@@ -1605,8 +1621,8 @@ async function generateAiHordeImg2ImgBuffer(
       ? [448, 576]
       : [512, 512];
 
-  const primarySource = await prepareNormalizedSourceBuffer(sourceBuffer, hordeW, hordeH, 'png');
-  if (!primarySource) return null;
+  const normalizedSource = await prepareNormalizedSourceBuffer(sourceBuffer, hordeW, hordeH, 'png');
+  const primarySource = normalizedSource || sourceBuffer;
 
   let hordeModels = [
     'Deliberate',

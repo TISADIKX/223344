@@ -92,7 +92,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 transition={{ delay: 0.05, duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
                 className="w-12 h-12 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-2.5 p-2 shadow-inner"
               >
-                <img src="/logo-icon.svg" alt="BloopX" className="w-8 h-8 object-contain" />
+                <img src="./logo-icon.svg" alt="BloopX" className="w-8 h-8 object-contain" />
               </motion.div>
               <h2 className="text-[17px] font-semibold text-white tracking-tight mb-1">
                 Sign in to BloopX

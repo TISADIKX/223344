@@ -1,24 +1,23 @@
+# Block direct browser access to server-side PHP secrets file
+<Files "php-config.php">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</Files>
+
 <IfModule mod_rewrite.c>
   RewriteEngine On
-  RewriteBase /
 
-  # Handle CORS preflight
-  RewriteCond %{REQUEST_METHOD} OPTIONS
-  RewriteRule ^(.*)$ $1 [R=200,L]
-
-  # Route API endpoints cleanly to their respective PHP files on Apache/InfinityFree
-  RewriteRule ^api/chat/?$ api/chat.php [QSA,L]
-  RewriteRule ^api/generate-image/?$ api/generate-image.php [QSA,L]
-  RewriteRule ^api/generate-video/?$ api/generate-video.php [QSA,L]
-  RewriteRule ^api/transcribe/?$ api/transcribe.php [QSA,L]
-  RewriteRule ^api/health/?$ api/health.php [QSA,L]
-
-  # If requested resource is an existing file or directory, serve directly
+  # Serve existing files (including generate.php, config.js, assets/) directly
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^ - [L]
 
-  # Otherwise rewrite all requests to index.html (SPA Fallback)
+  # SPA Fallback to relative index.html
   RewriteRule ^ index.html [L]
 </IfModule>
 
@@ -28,11 +27,4 @@
   AddType application/manifest+json .webmanifest
   AddType video/mp4 .mp4
   AddType image/webp .webp
-</IfModule>
-
-# Security and CORS headers
-<IfModule mod_headers.c>
-  Header set Access-Control-Allow-Origin "*"
-  Header set Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
-  Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
 </IfModule>
