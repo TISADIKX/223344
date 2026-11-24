@@ -30,7 +30,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const result = await pollStatelessVideoJob(state, 42000);
+    const result = await pollStatelessVideoJob(state, 16000);
     sendJson(res, result.status, result.body);
   } catch (err: any) {
     sendJson(res, 200, {

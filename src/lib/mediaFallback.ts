@@ -93,7 +93,9 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 function loadImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    if (!src.startsWith('data:') && !src.startsWith('blob:') && !src.startsWith('/')) {
+      img.crossOrigin = 'anonymous';
+    }
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error('Image load error'));
     img.src = src;
@@ -280,6 +282,26 @@ async function callGradioPhotoInBrowser(
   }
 }
 
+let hordeSlotQueue: Promise<void> = Promise.resolve();
+
+function acquireHordeSubmitSlot(minGapMs: number = 800): Promise<void> {
+  const prev = hordeSlotQueue;
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  hordeSlotQueue = current;
+  return prev.then(
+    () =>
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          resolve();
+          release();
+        }, minGapMs);
+      })
+  );
+}
+
 async function submitAiHordePhotoInBrowser(
   fullPrompt: string,
   aspectRatio: PhotoAspectRatio,
@@ -338,19 +360,28 @@ async function submitAiHordePhotoInBrowser(
         censor_nsfw: true,
         r2: true,
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(9000),
     });
 
   try {
-    let res = await submitJob(hordeW, hordeH, 16, models);
-    if (res.status === 403 || res.status === 400) {
-      res = await submitJob(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await acquireHordeSubmitSlot(attempt === 0 ? 750 : 1400);
+      res = await submitJob(hordeW, hordeH, 16, models);
+      if (res.status === 429 || res.status === 503) {
+        await new Promise((r) => setTimeout(r, 1300));
+        continue;
+      }
+      if (res.status === 403 || res.status === 400) {
+        res = await submitJob(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+      }
+      break;
     }
-    if (!res.ok) return null;
+    if (!res || !res.ok) return null;
     const data: any = await res.json();
     const jobId = data?.id;
     if (!jobId) return null;
-    return await pollAiHordeImageInBrowser(jobId, 46000);
+    return await pollAiHordeImageInBrowser(jobId, 48000);
   } catch {
     return null;
   }
@@ -418,6 +449,225 @@ export async function editPhotoDirectlyInBrowser(
   return await submitAiHordePhotoInBrowser(finalPrompt, aspectRatio, sourceBase64, strength);
 }
 
+// Server-assisted + browser-direct keyframe synthesizer (leverages HF_TOKEN on server first, then staggered browser providers)
+export async function generateTier5KeyframeInBrowser(
+  framePrompt: string,
+  aspectRatio: PhotoAspectRatio,
+  quality: PhotoQuality
+): Promise<string | null> {
+  let serverHordeJobId: string | null = null;
+  let compiledPrompt = framePrompt;
+
+  try {
+    const res = await fetch('/api/generate-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: framePrompt,
+        aspectRatio,
+        quality,
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      if (typeof data?.imageUrl === 'string' && data.imageUrl.length > 20) {
+        return data.imageUrl;
+      }
+      if (typeof data?.compiledPrompt === 'string' && data.compiledPrompt) {
+        compiledPrompt = data.compiledPrompt;
+      }
+      if (typeof data?.hordeJobId === 'string' && data.hordeJobId) {
+        serverHordeJobId = data.hordeJobId;
+      }
+    }
+  } catch {
+    // Fall back to direct browser providers cleanly
+  }
+
+  const racers: Array<Promise<string>> = [
+    generatePhotoDirectlyInBrowser(framePrompt, aspectRatio, quality, compiledPrompt).then((u) => {
+      if (!u) throw new Error('direct_kf_empty');
+      return u;
+    }),
+  ];
+  if (serverHordeJobId) {
+    racers.push(
+      pollAiHordeImageInBrowser(serverHordeJobId, 48000).then((u) => {
+        if (!u) throw new Error('horde_kf_empty');
+        return u;
+      })
+    );
+  }
+
+  try {
+    return await Promise.any(racers);
+  } catch {
+    return null;
+  }
+}
+
+function verifyPlayableVideoBlobUrl(blobUrl: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      v.removeAttribute('src');
+      v.load();
+      resolve(ok);
+    };
+    v.preload = 'metadata';
+    v.muted = true;
+    v.playsInline = true;
+    v.onloadedmetadata = () => finish((v.videoWidth || 0) > 0);
+    v.onerror = () => finish(false);
+    v.src = blobUrl;
+    setTimeout(() => finish(true), 2500);
+  });
+}
+
+async function recordCanvasSequenceWithMime(
+  imgs: HTMLImageElement[],
+  targetSeconds: VideoDuration,
+  outW: number,
+  outH: number,
+  quality: VideoQuality,
+  mimeType: string,
+  onProgress?: (pct: number) => void
+): Promise<string | null> {
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx || typeof canvas.captureStream !== 'function') return null;
+
+  const stream = canvas.captureStream(30);
+  const recorder = mimeType
+    ? new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: quality === '480p' ? 2_200_000 : 4_200_000,
+      })
+    : new MediaRecorder(stream);
+
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+  };
+
+  const drawCoverMotionFrame = (
+    img: HTMLImageElement,
+    segProgress: number,
+    motionIndex: number,
+    alpha: number
+  ) => {
+    const baseScale = Math.max(outW / (img.naturalWidth || outW), outH / (img.naturalHeight || outH));
+    let zoom = 1.06;
+    let panX = 0.5;
+    if (motionIndex % 3 === 0) {
+      zoom = 1.0 + 0.12 * segProgress;
+    } else if (motionIndex % 3 === 1) {
+      zoom = 1.12;
+      panX = 0.25 + 0.5 * segProgress;
+    } else {
+      zoom = 1.12 - 0.12 * segProgress;
+    }
+    const drawW = (img.naturalWidth || outW) * baseScale * zoom;
+    const drawH = (img.naturalHeight || outH) * baseScale * zoom;
+    const offsetX = -(drawW - outW) * panX;
+    const offsetY = -(drawH - outH) * 0.5;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+    ctx.restore();
+  };
+
+  const totalMs = targetSeconds * 1000;
+  const segmentMs = totalMs / imgs.length;
+  const xfadeMs = 650;
+
+  return await new Promise<string | null>((resolve) => {
+    let rafId = 0;
+    let safetyTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+
+    const cleanupTimers = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      if (safetyTimer) clearInterval(safetyTimer);
+    };
+
+    recorder.onerror = () => {
+      cleanupTimers();
+      stream.getTracks().forEach((t) => t.stop());
+      resolve(null);
+    };
+
+    recorder.onstop = () => {
+      cleanupTimers();
+      stream.getTracks().forEach((t) => t.stop());
+      if (chunks.length === 0) {
+        resolve(null);
+        return;
+      }
+      const resolvedMime = chunks[0]?.type || mimeType || 'video/webm';
+      const blob = new Blob(chunks, { type: resolvedMime });
+      if (blob.size < 4000) {
+        resolve(null);
+        return;
+      }
+      resolve(URL.createObjectURL(blob));
+    };
+
+    drawCoverMotionFrame(imgs[0], 0, 0, 1);
+    recorder.start(250);
+
+    const startTime = performance.now();
+    const renderTick = () => {
+      if (stopped) return;
+      const elapsed = performance.now() - startTime;
+      const clamped = Math.min(totalMs, elapsed);
+      const rawSeg = Math.floor(clamped / segmentMs);
+      const segIdx = Math.min(imgs.length - 1, rawSeg);
+      const segElapsed = clamped - segIdx * segmentMs;
+      const segProgress = Math.min(1, Math.max(0, segElapsed / segmentMs));
+
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, outW, outH);
+      drawCoverMotionFrame(imgs[segIdx], segProgress, segIdx, 1);
+
+      if (segIdx < imgs.length - 1 && segElapsed > segmentMs - xfadeMs) {
+        const blend = (segElapsed - (segmentMs - xfadeMs)) / xfadeMs;
+        drawCoverMotionFrame(imgs[segIdx + 1], 0, segIdx + 1, Math.min(1, Math.max(0, blend)));
+      }
+
+      const pct = Math.min(98, Math.round(78 + (clamped / totalMs) * 20));
+      onProgress?.(pct);
+
+      if (elapsed >= totalMs) {
+        stopped = true;
+        cleanupTimers();
+        try {
+          if (typeof recorder.requestData === 'function' && recorder.state === 'recording') {
+            recorder.requestData();
+          }
+          if (recorder.state !== 'inactive') {
+            recorder.stop();
+          }
+        } catch {
+          resolve(null);
+        }
+        return;
+      }
+      rafId = requestAnimationFrame(renderTick);
+    };
+
+    rafId = requestAnimationFrame(renderTick);
+    // Safety timer keeps rendering advancing smoothly even if rAF pauses briefly
+    safetyTimer = setInterval(renderTick, 120);
+  });
+}
+
 // Tier 5 ZeroGPU-independent browser 30fps storyboard motion compositor (used only when all 4 Wan Spaces exhaust quota)
 export async function composeStoryboardVideoInBrowser(
   frameUrls: string[],
@@ -429,7 +679,15 @@ export async function composeStoryboardVideoInBrowser(
   if (frameUrls.length === 0 || typeof MediaRecorder === 'undefined') return null;
 
   try {
-    const loadedImgs = await Promise.all(frameUrls.map((u) => loadImageElement(u)));
+    const loadedImgs: HTMLImageElement[] = [];
+    for (const u of frameUrls) {
+      try {
+        loadedImgs.push(await loadImageElement(u));
+      } catch {
+        // Skip broken individual frame if another loaded
+      }
+    }
+    if (loadedImgs.length === 0) return null;
     const imgs = loadedImgs.length >= 2 ? loadedImgs : [loadedImgs[0], loadedImgs[0]];
 
     const [outW, outH] =
@@ -445,114 +703,36 @@ export async function composeStoryboardVideoInBrowser(
         ? [854, 480]
         : [1280, 720];
 
-    const canvas = document.createElement('canvas');
-    canvas.width = outW;
-    canvas.height = outH;
-    const ctx = canvas.getContext('2d');
-    if (!ctx || typeof canvas.captureStream !== 'function') return null;
-
+    // Prefer native WebM codecs for Chrome/Firefox/Edge canvas recording; fall back to MP4 for Safari
     const mimeCandidates = [
-      'video/mp4;codecs=avc1.42E01E',
-      'video/mp4',
       'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
       'video/webm',
+      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4',
+      '',
     ];
-    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || '';
+    const supportedCodecs = mimeCandidates.filter(
+      (m) => m === '' || MediaRecorder.isTypeSupported(m)
+    );
 
-    const stream = canvas.captureStream(30);
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: quality === '480p' ? 2_200_000 : 4_200_000 })
-      : new MediaRecorder(stream);
-
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-    };
-
-    const drawCoverMotionFrame = (
-      img: HTMLImageElement,
-      segProgress: number,
-      motionIndex: number,
-      alpha: number
-    ) => {
-      const baseScale = Math.max(outW / (img.naturalWidth || outW), outH / (img.naturalHeight || outH));
-      let zoom = 1.06;
-      let panX = 0.5;
-      if (motionIndex % 3 === 0) {
-        zoom = 1.0 + 0.12 * segProgress;
-      } else if (motionIndex % 3 === 1) {
-        zoom = 1.12;
-        panX = 0.25 + 0.5 * segProgress;
-      } else {
-        zoom = 1.12 - 0.12 * segProgress;
+    for (const codec of supportedCodecs.slice(0, 2)) {
+      const blobUrl = await recordCanvasSequenceWithMime(
+        imgs,
+        targetSeconds,
+        outW,
+        outH,
+        quality,
+        codec,
+        onProgress
+      );
+      if (blobUrl) {
+        const playable = await verifyPlayableVideoBlobUrl(blobUrl);
+        if (playable) return blobUrl;
+        URL.revokeObjectURL(blobUrl);
       }
-      const drawW = (img.naturalWidth || outW) * baseScale * zoom;
-      const drawH = (img.naturalHeight || outH) * baseScale * zoom;
-      const offsetX = -(drawW - outW) * panX;
-      const offsetY = -(drawH - outH) * 0.5;
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
-      ctx.restore();
-    };
-
-    const totalMs = targetSeconds * 1000;
-    const fps = 30;
-    const frameIntervalMs = 1000 / fps;
-    const segmentMs = totalMs / imgs.length;
-    const xfadeMs = 650;
-
-    return await new Promise<string | null>((resolve) => {
-      recorder.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        if (chunks.length === 0) {
-          resolve(null);
-          return;
-        }
-        const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
-        if (blob.size < 4000) {
-          resolve(null);
-          return;
-        }
-        resolve(URL.createObjectURL(blob));
-      };
-
-      // Draw initial frame immediately before starting recorder
-      drawCoverMotionFrame(imgs[0], 0, 0, 1);
-      recorder.start(250);
-
-      const startTime = performance.now();
-      const timer = setInterval(() => {
-        const elapsed = performance.now() - startTime;
-        const clamped = Math.min(totalMs, elapsed);
-        const rawSeg = Math.floor(clamped / segmentMs);
-        const segIdx = Math.min(imgs.length - 1, rawSeg);
-        const segElapsed = clamped - segIdx * segmentMs;
-        const segProgress = Math.min(1, Math.max(0, segElapsed / segmentMs));
-
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, outW, outH);
-        drawCoverMotionFrame(imgs[segIdx], segProgress, segIdx, 1);
-
-        if (segIdx < imgs.length - 1 && segElapsed > segmentMs - xfadeMs) {
-          const blend = (segElapsed - (segmentMs - xfadeMs)) / xfadeMs;
-          drawCoverMotionFrame(imgs[segIdx + 1], 0, segIdx + 1, Math.min(1, Math.max(0, blend)));
-        }
-
-        const pct = Math.min(98, Math.round(78 + (clamped / totalMs) * 20));
-        onProgress?.(pct);
-
-        if (elapsed >= totalMs) {
-          clearInterval(timer);
-          try {
-            recorder.stop();
-          } catch {
-            resolve(null);
-          }
-        }
-      }, frameIntervalMs);
-    });
+    }
+    return null;
   } catch {
     return null;
   }

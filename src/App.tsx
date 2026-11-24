@@ -15,6 +15,7 @@ import {
   composeStoryboardVideoInBrowser,
   editPhotoDirectlyInBrowser,
   generatePhotoDirectlyInBrowser,
+  generateTier5KeyframeInBrowser,
   pollAiHordeImageInBrowser,
 } from './lib/mediaFallback';
 import {
@@ -1693,21 +1694,40 @@ export default function App() {
             const eventId = postJson?.event_id;
             if (!eventId) return { url: null, quotaExceeded: false };
 
+            const sseCtrl = new AbortController();
+            const sseHardTimeout = setTimeout(() => sseCtrl.abort(), 95000);
+            let sawActiveProgress = false;
+            const initialActivityTimeout = setTimeout(() => {
+              if (!sawActiveProgress) sseCtrl.abort();
+            }, 18000);
+
             const sseRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}/${eventId}`, {
-              signal: AbortSignal.timeout(95000),
+              signal: sseCtrl.signal,
             });
-            if (!sseRes.ok || !sseRes.body) return { url: null, quotaExceeded: false };
+            if (!sseRes.ok || !sseRes.body) {
+              clearTimeout(sseHardTimeout);
+              clearTimeout(initialActivityTimeout);
+              return { url: null, quotaExceeded: false };
+            }
 
             const reader = sseRes.body.getReader();
             const decoder = new TextDecoder();
             let sseText = '';
             let stepRatio = 0.06;
 
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              const chunk = decoder.decode(value, { stream: true });
-              sseText += chunk;
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value, { stream: true });
+                sseText += chunk;
+                if (
+                  chunk.includes('"index"') ||
+                  chunk.includes('generating') ||
+                  chunk.includes('event: complete')
+                ) {
+                  sawActiveProgress = true;
+                }
 
               const idxMatch = chunk.match(/"index":\s*(\d+)\s*,\s*"length":\s*(\d+)/);
               if (idxMatch) {
@@ -1732,6 +1752,10 @@ export default function App() {
                   quotaExceeded: isExplicitQuota,
                 };
               }
+            }
+            } finally {
+              clearTimeout(sseHardTimeout);
+              clearTimeout(initialActivityTimeout);
             }
 
             const urlMatch = sseText.match(/"url":\s*"([^"]+\.mp4[^"]*)"/i);
@@ -1923,7 +1947,7 @@ export default function App() {
               await new Promise((r) => setTimeout(r, 950));
               try {
                 const pollRes = await fetch(`/api/generate-video/status/${activeJobId}`, {
-                  signal: AbortSignal.timeout(55000),
+                  signal: AbortSignal.timeout(15000),
                 });
                 if (!pollRes.ok) {
                   if (pollRes.status === 404) break;
@@ -1957,7 +1981,7 @@ export default function App() {
           }
         }
 
-        // 6. Tier 5 ZeroGPU-independent Xkiro-SenseNova Storyboard Motion fallback (ensures Vercel never fails when ZeroGPU quota is exhausted)
+        // 6. Tier 5 ZeroGPU-independent Storyboard Motion fallback (ensures Vercel never fails when ZeroGPU quota is exhausted)
         if (!finalVideoUrl) {
           advanceVideoFloor(32);
           const frameCount = selectedDuration === 5 ? 2 : 3;
@@ -1996,8 +2020,11 @@ export default function App() {
           const kfPhotoQuality: PhotoQuality = selectedQuality === '1080p' ? 'hd' : 'standard';
           let completedKf = 0;
           const kfUrls = await Promise.all(
-            framePrompts.slice(0, frameCount).map(async (fp) => {
-              const imgUrl = await generatePhotoDirectlyInBrowser(fp, kfPhotoAspect, kfPhotoQuality, fp);
+            framePrompts.slice(0, frameCount).map(async (fp, kfIdx) => {
+              if (kfIdx > 0) {
+                await new Promise((r) => setTimeout(r, kfIdx * 750));
+              }
+              const imgUrl = await generateTier5KeyframeInBrowser(fp, kfPhotoAspect, kfPhotoQuality);
               completedKf += 1;
               advanceVideoFloor(42 + Math.round((completedKf / frameCount) * 34));
               return imgUrl;

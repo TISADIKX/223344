@@ -21,31 +21,14 @@ export const XKIRO_MODELS_URL = 'https://api.xkiro.com/v1/models';
 
 export const XKIRO_VISION_MODELS = [
   'sensenova/sensenova-6.8-flash-lite',
-  'mistralai/ministral-8b',
-  'mistralai/mistral-large-2512',
-  'mistralai/mistral-medium-3.5',
-  'mistralai/mistral-small-2603',
-  'cohere/command-a-plus',
-  'cohere/command-a-vision',
-  'mistralai/ministral-14b',
 ];
 
 export const XKIRO_TEXT_MODELS = [
   'sensenova/sensenova-6.8-flash-lite',
-  'mistralai/ministral-8b',
-  'mistralai/mistral-large-2512',
-  'mistralai/mistral-medium-3.5',
-  'mistralai/mistral-small-2603',
-  'cohere/command-a-plus',
-  'cohere/command-a',
-  'mistralai/ministral-14b',
 ];
 
 export const XKIRO_PHOTO_MODELS = [
   'sensenova/sensenova-6.8-flash-lite',
-  'mistralai/ministral-8b',
-  'mistralai/mistral-small-2603',
-  'mistralai/mistral-large-2512',
 ];
 
 export const HF_CHAT_ROUTER_URL = 'https://router.huggingface.co/v1/chat/completions';
@@ -53,18 +36,12 @@ export const HF_CHAT_MODELS = [
   'meta-llama/Llama-3.3-70B-Instruct',
   'Qwen/Qwen2.5-72B-Instruct',
   'deepseek-ai/DeepSeek-R1',
-  'mistralai/Mistral-7B-Instruct-v0.3',
   'meta-llama/Llama-3.1-8B-Instruct',
 ];
 export const HF_DEFAULT_CHAT_MODEL = HF_CHAT_MODELS[0];
 
 // Store expiration timestamp (blockedUntil ms) per model so 503/429 short-circuit cleanly
 const xkiroUnavailableCache = new Map<string, number>();
-let xkiroCatalogCache: { freeModels: Set<string>; dynamicQwen: string[]; fetchedAt: number } = {
-  freeModels: new Set(),
-  dynamicQwen: [],
-  fetchedAt: 0,
-};
 
 export function markXkiroModelCooldown(model: string, status: number): void {
   const now = Date.now();
@@ -84,40 +61,7 @@ export function isXkiroModelInCooldown(model: string, now: number = Date.now()):
 }
 
 export async function getPrioritizedXkiroModels(hasImages: boolean): Promise<string[]> {
-  const now = Date.now();
-  if (now - xkiroCatalogCache.fetchedAt > 10 * 60 * 1000) {
-    try {
-      const res = await fetch(XKIRO_MODELS_URL, { signal: AbortSignal.timeout(3500) });
-      if (res.ok) {
-        const json: any = await res.json();
-        const catalog: any[] = Array.isArray(json?.data) ? json.data : [];
-        const freeEntries = catalog.filter(
-          (m) => typeof m?.id === 'string' && m?.access_tier === 'free'
-        );
-        const freeModels = new Set(freeEntries.map((m) => m.id as string));
-        const dynamicQwen = freeEntries
-          .filter((m) => /qwen/i.test(m.id) && (!hasImages || m?.capabilities?.vision))
-          .map((m) => m.id as string);
-        xkiroCatalogCache = { freeModels, dynamicQwen, fetchedAt: now };
-      } else {
-        xkiroCatalogCache.fetchedAt = now - 8 * 60 * 1000;
-      }
-    } catch {
-      xkiroCatalogCache.fetchedAt = now - 8 * 60 * 1000;
-    }
-  }
-
-  const baseList = hasImages ? XKIRO_VISION_MODELS : XKIRO_TEXT_MODELS;
-  const combined = [...xkiroCatalogCache.dynamicQwen, ...baseList];
-  const deduped: string[] = [];
-  const hasCatalog = xkiroCatalogCache.freeModels.size > 0;
-  for (const id of combined) {
-    if (deduped.includes(id)) continue;
-    if (hasCatalog && !xkiroCatalogCache.freeModels.has(id)) continue;
-    if (isXkiroModelInCooldown(id, now)) continue;
-    deduped.push(id);
-  }
-  return deduped.length > 0 ? deduped : baseList;
+  return hasImages ? [...XKIRO_VISION_MODELS] : [...XKIRO_TEXT_MODELS];
 }
 
 export function extractTextFromChoiceContent(rawContent: any): string {
@@ -2257,57 +2201,16 @@ export async function planVideoStoryboardFrames(
   frameCount: number
 ): Promise<string[]> {
   const cleanSubject = rawPrompt.trim().slice(0, 500);
-  const fallbackFrames =
-    frameCount <= 2
-      ? [
-          `Cinematic 35mm establishing wide shot of ${cleanSubject}, dramatic natural lighting, crisp depth of field, authentic live-action photography`,
-          `Cinematic 35mm dynamic close-up continuation of ${cleanSubject} in motion, warm golden rim lighting, rich textures, authentic live-action photography`,
-        ]
-      : [
-          `Cinematic 35mm opening wide shot of ${cleanSubject}, atmospheric natural lighting, authentic live-action photography`,
-          `Cinematic 35mm mid-action dynamic tracking shot of ${cleanSubject}, vivid natural motion, crisp optical focus, authentic live-action photography`,
-          `Cinematic 35mm golden atmospheric closing shot of ${cleanSubject}, dramatic light rays and natural depth, authentic live-action photography`,
-        ];
-
-  if (!getXkiroApiKey()) {
-    return fallbackFrames;
-  }
-
-  try {
-    const directorSystem = `You are a film director creating ${frameCount} sequential keyframe still descriptions for a ${
-      frameCount <= 2 ? '5-second' : '10-second'
-    } live-action video about: "${cleanSubject}".
-Keep the EXACT same setting, subject identity, weather, and lighting across every frame while advancing the camera angle and physical action smoothly from start to finish.
-Return ONLY a JSON array of ${frameCount} strings (each 22-40 words, photorealistic live-action 35mm film still description, no markdown).`;
-
-    const aiRes = await Promise.race([
-      callXkiroChat(
-        [
-          { role: 'system', content: directorSystem },
-          { role: 'user', content: cleanSubject },
-        ],
-        false
-      ),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500)),
-    ]);
-    if (aiRes?.content) {
-      const match = aiRes.content.match(/\[[\s\S]*\]/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (
-          Array.isArray(parsed) &&
-          parsed.length >= frameCount &&
-          parsed.slice(0, frameCount).every((s) => typeof s === 'string' && s.trim().length > 10)
-        ) {
-          return parsed.slice(0, frameCount).map((s: string) => s.trim().slice(0, 400));
-        }
-      }
-    }
-  } catch {
-    // Use deterministic storyboard frames cleanly
-  }
-
-  return fallbackFrames;
+  return frameCount <= 2
+    ? [
+        `Cinematic 35mm establishing wide shot of ${cleanSubject}, dramatic natural lighting, crisp depth of field, authentic live-action photography`,
+        `Cinematic 35mm dynamic close-up continuation of ${cleanSubject} in motion, warm golden rim lighting, rich textures, authentic live-action photography`,
+      ]
+    : [
+        `Cinematic 35mm opening wide shot of ${cleanSubject}, atmospheric natural lighting, authentic live-action photography`,
+        `Cinematic 35mm mid-action dynamic tracking shot of ${cleanSubject}, vivid natural motion, crisp optical focus, authentic live-action photography`,
+        `Cinematic 35mm golden atmospheric closing shot of ${cleanSubject}, dramatic light rays and natural depth, authentic live-action photography`,
+      ];
 }
 
 export async function startStatelessVideoJob(body: any): Promise<{ status: number; body: any }> {
