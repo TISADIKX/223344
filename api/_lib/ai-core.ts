@@ -816,14 +816,14 @@ export async function compileStrictRealisticPrompt(
 
   const xkiroKey = getXkiroApiKey();
   if (xkiroKey) {
-    const deadline = Date.now() + 4500;
+    const deadline = Date.now() + 2400;
     const now = Date.now();
     const activePhotoModels = XKIRO_PHOTO_MODELS.filter((m) => !isXkiroModelInCooldown(m, now));
     const modelsToTry = activePhotoModels.length > 0 ? activePhotoModels : XKIRO_PHOTO_MODELS;
 
     for (const model of modelsToTry) {
       const remaining = deadline - Date.now();
-      if (remaining < 700) break;
+      if (remaining < 600) break;
       try {
         const xRes = await fetch(XKIRO_CHAT_URL, {
           method: 'POST',
@@ -841,7 +841,7 @@ export async function compileStrictRealisticPrompt(
               { role: 'user', content: rawPrompt },
             ],
           }),
-          signal: AbortSignal.timeout(Math.min(3500, remaining)),
+          signal: AbortSignal.timeout(Math.min(2000, remaining)),
         });
         if (!xRes.ok) {
           if (xRes.status === 401) break;
@@ -1159,6 +1159,69 @@ export async function generateAiHordePhotoBuffer(
   return null;
 }
 
+export async function submitAiHordePhotoJob(
+  fullPrompt: string,
+  aspectRatio: PhotoAspectOption
+): Promise<string | null> {
+  const [hordeW, hordeH] =
+    aspectRatio === '16:9'
+      ? [640, 384]
+      : aspectRatio === '9:16'
+      ? [384, 640]
+      : aspectRatio === '4:3'
+      ? [576, 448]
+      : aspectRatio === '3:4'
+      ? [448, 576]
+      : [512, 512];
+
+  const hordeModels = [
+    'Deliberate',
+    'Realistic Vision',
+    "ICBINP - I Can't Believe It's Not Photography",
+    'Edge Of Realism',
+    'majicMIX realistic',
+    'stable_diffusion',
+  ];
+
+  const submitJob = (w: number, h: number, steps: number, models: string[]) =>
+    fetch('https://stablehorde.net/api/v2/generate/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: '0000000000',
+        'Client-Agent': 'BloopX:1.0:server',
+      },
+      body: JSON.stringify({
+        prompt: `${fullPrompt} ### cartoon, anime, illustration, cgi, 3d render, watermark, text, blurry, deformed`,
+        params: {
+          width: w,
+          height: h,
+          steps,
+          n: 1,
+          cfg_scale: 7,
+          sampler_name: 'k_euler',
+        },
+        models,
+        nsfw: false,
+        censor_nsfw: true,
+        r2: true,
+      }),
+      signal: AbortSignal.timeout(4500),
+    });
+
+  try {
+    let submitRes = await submitJob(hordeW, hordeH, 16, hordeModels);
+    if (submitRes.status === 403 || submitRes.status === 400) {
+      submitRes = await submitJob(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+    }
+    if (!submitRes.ok) return null;
+    const submitJson: any = await submitRes.json();
+    return typeof submitJson?.id === 'string' && submitJson.id ? submitJson.id : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function generateReliablePhoto(
   compiledScenePrompt: string,
   aspectRatio: PhotoAspectOption,
@@ -1177,6 +1240,7 @@ export async function generateReliablePhoto(
   const seed = Math.floor(Math.random() * 2147483647);
   const fluxSteps = quality === 'ultra' ? 6 : 4;
   const hasXkiro = Boolean(getXkiroApiKey());
+  const isServerlessFast = !hooks?.enhancePhoto;
 
   const finalize = async (buf: Buffer, fallbackMime: string, provider: string) => {
     const detected = detectImageMimeType(buf, fallbackMime);
@@ -1187,9 +1251,9 @@ export async function generateReliablePhoto(
     return { buffer: buf, mimeType: detected, provider };
   };
 
-  // Tier 1: Race HF Inference API + FLUX.1-schnell Space
+  // Race HF Inference + FLUX.1-schnell + Z-Image-Turbo cleanly within serverless timeout
   try {
-    const firstFastFlux = await Promise.any([
+    const fastWinner = await Promise.any([
       generateHuggingFaceInferencePhoto(fullPrompt, fluxWidth, fluxHeight, clientToken).then((buf) => {
         if (!buf) throw new Error('hf-inference-empty');
         return {
@@ -1201,7 +1265,7 @@ export async function generateReliablePhoto(
       generateGradioFluxPhotoBuffer(
         'https://black-forest-labs-flux-1-schnell.hf.space',
         [fullPrompt, seed, true, fluxWidth, fluxHeight, fluxSteps],
-        12000,
+        isServerlessFast ? 5200 : 12000,
         '/infer',
         clientToken
       ).then((buf) => {
@@ -1212,19 +1276,10 @@ export async function generateReliablePhoto(
           provider: hasXkiro ? 'Xkiro-SenseNova-FLUX' : 'FLUX.1-schnell',
         };
       }),
-    ]);
-    return await finalize(firstFastFlux.buf, firstFastFlux.mime, firstFastFlux.provider);
-  } catch {
-    // Continue to Tier 2
-  }
-
-  // Tier 2: Race Z-Image-Turbo Space + Distributed AI Horde
-  try {
-    const fallbackRender = await Promise.any([
       generateGradioFluxPhotoBuffer(
         'https://tongyi-mai-z-image-turbo.hf.space',
         [fullPrompt, fluxWidth, fluxHeight, 9, seed, true],
-        9000,
+        isServerlessFast ? 5200 : 9500,
         '/generate',
         clientToken
       ).then((buf) => {
@@ -1235,19 +1290,25 @@ export async function generateReliablePhoto(
           provider: hasXkiro ? 'Xkiro-SenseNova-ZImage' : 'Z-Image-Turbo',
         };
       }),
-      generateAiHordePhotoBuffer(`${compiledScenePrompt}, ${framingHint}`, aspectRatio, 32000).then((buf) => {
-        if (!buf) throw new Error('horde-empty');
-        return {
-          buf,
-          mime: 'image/webp',
-          provider: hasXkiro ? 'Xkiro-SenseNova-SDXL' : 'SDXL-Photo',
-        };
-      }),
     ]);
-    return await finalize(fallbackRender.buf, fallbackRender.mime, fallbackRender.provider);
+    return await finalize(fastWinner.buf, fastWinner.mime, fastWinner.provider);
   } catch {
-    return null;
+    if (isServerlessFast) {
+      // On serverless without local FFmpeg, avoid blocking 32s on AI Horde polling; return null so handler sends pendingHorde immediately
+      return null;
+    }
   }
+
+  // Long-running Node server fallback: AI Horde polling
+  const hordeBuf = await generateAiHordePhotoBuffer(`${compiledScenePrompt}, ${framingHint}`, aspectRatio, 32000);
+  if (hordeBuf) {
+    return await finalize(
+      hordeBuf,
+      'image/webp',
+      hasXkiro ? 'Xkiro-SenseNova-SDXL' : 'SDXL-Photo'
+    );
+  }
+  return null;
 }
 
 export function buildFallbackPhotoEditPlan(editInstruction: string): PhotoEditPlan {
@@ -1632,6 +1693,74 @@ export async function editPhotoWithSenseNova(
   return null;
 }
 
+export async function submitAiHordeImg2ImgJob(
+  sourceBuffer: Buffer,
+  editedPrompt: string,
+  aspectRatio: PhotoAspectOption,
+  denoisingStrength: number
+): Promise<string | null> {
+  const [hordeW, hordeH] =
+    aspectRatio === '16:9'
+      ? [640, 384]
+      : aspectRatio === '9:16'
+      ? [384, 640]
+      : aspectRatio === '4:3'
+      ? [576, 448]
+      : aspectRatio === '3:4'
+      ? [448, 576]
+      : [512, 512];
+
+  const hordeModels = [
+    'Deliberate',
+    'Realistic Vision',
+    "ICBINP - I Can't Believe It's Not Photography",
+    'Edge Of Realism',
+    'majicMIX realistic',
+    'stable_diffusion',
+  ];
+
+  const submitImg2Img = (w: number, h: number, steps: number, models: string[]) =>
+    fetch('https://stablehorde.net/api/v2/generate/async', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: '0000000000',
+        'Client-Agent': 'BloopX:1.0:server',
+      },
+      body: JSON.stringify({
+        prompt: `${editedPrompt} ### blurry, deformed, bad anatomy, watermark, text, low quality`,
+        source_image: sourceBuffer.toString('base64'),
+        source_processing: 'img2img',
+        params: {
+          width: w,
+          height: h,
+          steps,
+          denoising_strength: Number(denoisingStrength.toFixed(2)),
+          n: 1,
+          cfg_scale: 7.5,
+          sampler_name: 'k_euler',
+        },
+        models,
+        nsfw: false,
+        censor_nsfw: true,
+        r2: true,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+  try {
+    let submitRes = await submitImg2Img(hordeW, hordeH, 16, hordeModels);
+    if (submitRes.status === 403 || submitRes.status === 400) {
+      submitRes = await submitImg2Img(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+    }
+    if (!submitRes.ok) return null;
+    const submitJson: any = await submitRes.json();
+    return typeof submitJson?.id === 'string' && submitJson.id ? submitJson.id : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function handleGenerateImageRequest(
   body: any,
   clientHfToken?: string,
@@ -1652,6 +1781,7 @@ export async function handleGenerateImageRequest(
   const cleanPrompt = prompt.trim().slice(0, 1200);
   const aspectRatio = normalizePhotoAspect(rawAspect);
   const quality = normalizePhotoQuality(rawQuality);
+  const hasXkiro = Boolean(getXkiroApiKey());
 
   if (sourceImage && typeof sourceImage.data === 'string' && sourceImage.data.length > 0) {
     if (sourceImage.data.length > 25_000_000) {
@@ -1687,6 +1817,76 @@ export async function handleGenerateImageRequest(
             mimeType: img.mimeType,
           }))
       : [];
+
+    // Serverless fast path (no FFmpeg): plan via Xkiro Vision and return instant filterPlan or async Horde img2img jobId (<7s)
+    if (!hooks?.enhancePhoto) {
+      const fastDims = parseImageDimensionsFast(sourceBuffer);
+      const naturalAspect = fastDims ? pickClosestPhotoAspect(fastDims.width, fastDims.height) : aspectRatio;
+      const sourceDataUrl = `data:${rawMime};base64,${sourceBuffer.toString('base64')}`;
+      const additionalDataUrls = safeExtras.map((img: { data: string; mimeType: string }) => `data:${img.mimeType};base64,${img.data}`);
+      const plan = await planPhotoEditWithXkiro(sourceDataUrl, additionalDataUrls, cleanPrompt);
+
+      if (plan.mode === 'filter') {
+        let effectiveAspect = plan.cropAspect || naturalAspect;
+        if (plan.rotate === 90 || plan.rotate === 270) {
+          effectiveAspect =
+            effectiveAspect === '16:9'
+              ? '9:16'
+              : effectiveAspect === '9:16'
+              ? '16:9'
+              : effectiveAspect === '4:3'
+              ? '3:4'
+              : effectiveAspect === '3:4'
+              ? '4:3'
+              : '1:1';
+        }
+        return {
+          status: 200,
+          body: {
+            imageUrl: null,
+            filterPlan: plan,
+            aspectRatio: effectiveAspect,
+            quality,
+            edited: true,
+            provider: hasXkiro ? 'Xkiro-SenseNova-Editor' : 'BloopX-Photo-Editor',
+          },
+        };
+      }
+
+      const effectiveAspect = plan.targetAspect || naturalAspect;
+      const hordeJobId = await submitAiHordeImg2ImgJob(
+        sourceBuffer,
+        plan.editedPrompt,
+        effectiveAspect,
+        plan.strength
+      );
+      if (hordeJobId) {
+        return {
+          status: 200,
+          body: {
+            imageUrl: null,
+            pendingHorde: true,
+            hordeJobId,
+            editedPrompt: plan.editedPrompt,
+            aspectRatio: effectiveAspect,
+            quality,
+            edited: true,
+            provider: hasXkiro ? 'Xkiro-SenseNova-Edit-SDXL' : 'Photo-Edit-Img2Img',
+          },
+        };
+      }
+      return {
+        status: 200,
+        body: {
+          imageUrl: null,
+          editedPrompt: plan.editedPrompt,
+          aspectRatio: effectiveAspect,
+          quality,
+          edited: true,
+          cooldown: true,
+        },
+      };
+    }
 
     const edited = await editPhotoWithSenseNova(
       sourceBuffer,
@@ -1759,10 +1959,32 @@ export async function handleGenerateImageRequest(
     };
   }
 
+  // Serverless fast handoff: submit async AI Horde job (<1s) so browser completes polling without Vercel 10s/60s timeout
+  if (!hooks?.enhancePhoto) {
+    const framingHint =
+      aspectRatio === '16:9' || aspectRatio === '4:3'
+        ? 'wide horizontal composition'
+        : aspectRatio === '9:16' || aspectRatio === '3:4'
+        ? 'vertical portrait framing'
+        : 'balanced square framing';
+    const hordeJobId = await submitAiHordePhotoJob(`${compiledPrompt}, ${framingHint}`, aspectRatio);
+    return {
+      status: 200,
+      body: {
+        imageUrl: null,
+        compiledPrompt,
+        aspectRatio,
+        quality,
+        ...(hordeJobId ? { pendingHorde: true, hordeJobId } : { cooldown: true }),
+      },
+    };
+  }
+
   return {
     status: 200,
     body: {
       imageUrl: null,
+      compiledPrompt,
       cooldown: true,
     },
   };
@@ -2030,6 +2252,64 @@ export async function submitWanSpaceTier(
   }
 }
 
+export async function planVideoStoryboardFrames(
+  rawPrompt: string,
+  frameCount: number
+): Promise<string[]> {
+  const cleanSubject = rawPrompt.trim().slice(0, 500);
+  const fallbackFrames =
+    frameCount <= 2
+      ? [
+          `Cinematic 35mm establishing wide shot of ${cleanSubject}, dramatic natural lighting, crisp depth of field, authentic live-action photography`,
+          `Cinematic 35mm dynamic close-up continuation of ${cleanSubject} in motion, warm golden rim lighting, rich textures, authentic live-action photography`,
+        ]
+      : [
+          `Cinematic 35mm opening wide shot of ${cleanSubject}, atmospheric natural lighting, authentic live-action photography`,
+          `Cinematic 35mm mid-action dynamic tracking shot of ${cleanSubject}, vivid natural motion, crisp optical focus, authentic live-action photography`,
+          `Cinematic 35mm golden atmospheric closing shot of ${cleanSubject}, dramatic light rays and natural depth, authentic live-action photography`,
+        ];
+
+  if (!getXkiroApiKey()) {
+    return fallbackFrames;
+  }
+
+  try {
+    const directorSystem = `You are a film director creating ${frameCount} sequential keyframe still descriptions for a ${
+      frameCount <= 2 ? '5-second' : '10-second'
+    } live-action video about: "${cleanSubject}".
+Keep the EXACT same setting, subject identity, weather, and lighting across every frame while advancing the camera angle and physical action smoothly from start to finish.
+Return ONLY a JSON array of ${frameCount} strings (each 22-40 words, photorealistic live-action 35mm film still description, no markdown).`;
+
+    const aiRes = await Promise.race([
+      callXkiroChat(
+        [
+          { role: 'system', content: directorSystem },
+          { role: 'user', content: cleanSubject },
+        ],
+        false
+      ),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500)),
+    ]);
+    if (aiRes?.content) {
+      const match = aiRes.content.match(/\[[\s\S]*\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        if (
+          Array.isArray(parsed) &&
+          parsed.length >= frameCount &&
+          parsed.slice(0, frameCount).every((s) => typeof s === 'string' && s.trim().length > 10)
+        ) {
+          return parsed.slice(0, frameCount).map((s: string) => s.trim().slice(0, 400));
+        }
+      }
+    }
+  } catch {
+    // Use deterministic storyboard frames cleanly
+  }
+
+  return fallbackFrames;
+}
+
 export async function startStatelessVideoJob(body: any): Promise<{ status: number; body: any }> {
   const { prompt, duration: rawDuration, aspectRatio: rawAspect, quality: rawQuality } = body || {};
   if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -2068,13 +2348,13 @@ export async function startStatelessVideoJob(body: any): Promise<{ status: numbe
         },
       };
     }
-    if (submitted.quotaExceeded) break;
   }
 
   return {
     status: 503,
     body: {
       status: 'failed',
+      needsStoryboardFallback: true,
       error: 'Video generation servers are currently busy. Please try again in a moment.',
     },
   };
@@ -2091,6 +2371,7 @@ export async function pollStatelessVideoJob(
       body: {
         jobId: encodeStatelessVideoJob(state),
         status: 'failed',
+        needsStoryboardFallback: true,
         error: 'Video generation servers are currently busy. Please try again in a moment.',
       },
     };
@@ -2101,7 +2382,6 @@ export async function pollStatelessVideoJob(
     ? { Authorization: `Bearer ${token}` }
     : {};
 
-  let quotaExceeded = false;
   let lastProgress = Math.max(8, Math.min(95, state.pr || 10));
 
   try {
@@ -2117,6 +2397,7 @@ export async function pollStatelessVideoJob(
       const reader = sseRes.body.getReader();
       const decoder = new TextDecoder();
       let fullText = '';
+      let hadError = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -2136,9 +2417,7 @@ export async function pollStatelessVideoJob(
         }
 
         if (fullText.includes('event: error')) {
-          quotaExceeded =
-            /ZeroGPU quota|exceeded your.*quota/i.test(fullText) ||
-            /event:\s*error\s*\r?\n\s*data:\s*null\b/i.test(fullText);
+          hadError = true;
           try {
             await reader.cancel();
           } catch {}
@@ -2167,7 +2446,7 @@ export async function pollStatelessVideoJob(
         }
       }
 
-      if (!quotaExceeded && !fullText.includes('event: error')) {
+      if (!hadError && !fullText.includes('event: error')) {
         const rawUrl = extractGradioVideoUrl(fullText, tier.baseUrl);
         if (rawUrl) {
           return {
@@ -2188,36 +2467,33 @@ export async function pollStatelessVideoJob(
       }
     }
   } catch {
-    // Tier errored or hit Vercel per-poll budget; advance to next tier below
+    // Tier errored or timed out; advance cleanly to next tier below
   }
 
-  // Advance cleanly to next Wan tier so each tier gets its own fresh serverless window
-  if (!quotaExceeded) {
-    for (let nextIdx = state.t + 1; nextIdx < WAN_SPACE_TIERS.length; nextIdx++) {
-      const submitted = await submitWanSpaceTier(nextIdx, state.p, state.a);
-      if (submitted.eventId) {
-        const nextProgress = Math.max(lastProgress, Math.min(85, lastProgress + 6));
-        const nextJobId = encodeStatelessVideoJob({
-          ...state,
-          t: nextIdx,
-          e: submitted.eventId,
-          pr: nextProgress,
-        });
-        return {
-          status: 200,
-          body: {
-            jobId: nextJobId,
-            nextJobId,
-            status: 'processing',
-            progress: nextProgress,
-            prompt: state.p,
-            duration: state.d,
-            aspectRatio: state.a,
-            quality: state.q,
-          },
-        };
-      }
-      if (submitted.quotaExceeded) break;
+  // Always try subsequent Wan tiers (even if an earlier tier returned event:error or ZeroGPU quota)
+  for (let nextIdx = state.t + 1; nextIdx < WAN_SPACE_TIERS.length; nextIdx++) {
+    const submitted = await submitWanSpaceTier(nextIdx, state.p, state.a);
+    if (submitted.eventId) {
+      const nextProgress = Math.max(lastProgress, Math.min(85, lastProgress + 6));
+      const nextJobId = encodeStatelessVideoJob({
+        ...state,
+        t: nextIdx,
+        e: submitted.eventId,
+        pr: nextProgress,
+      });
+      return {
+        status: 200,
+        body: {
+          jobId: nextJobId,
+          nextJobId,
+          status: 'processing',
+          progress: nextProgress,
+          prompt: state.p,
+          duration: state.d,
+          aspectRatio: state.a,
+          quality: state.q,
+        },
+      };
     }
   }
 
@@ -2226,6 +2502,7 @@ export async function pollStatelessVideoJob(
     body: {
       jobId: encodeStatelessVideoJob(state),
       status: 'failed',
+      needsStoryboardFallback: true,
       progress: 0,
       error: 'Video generation servers are currently busy. Please try again in a moment.',
     },

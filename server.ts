@@ -2712,13 +2712,16 @@ async function planVideoStoryboardFrames(
 Keep the EXACT same setting, subject identity, weather, and lighting across every frame while advancing the camera angle and physical action smoothly from start to finish.
 Return ONLY a JSON array of ${frameCount} strings (each 22-40 words, photorealistic live-action 35mm film still description, no markdown).`;
 
-    const aiRes = await callXkiroChat(
-      [
-        { role: 'system', content: directorSystem },
-        { role: 'user', content: cleanSubject },
-      ],
-      false
-    );
+    const aiRes = await Promise.race([
+      callXkiroChat(
+        [
+          { role: 'system', content: directorSystem },
+          { role: 'user', content: cleanSubject },
+        ],
+        false
+      ),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500)),
+    ]);
     if (aiRes?.content) {
       const match = aiRes.content.match(/\[[\s\S]*\]/);
       if (match) {
@@ -3111,6 +3114,21 @@ app.post('/api/master-wan-video', async (req, res) => {
     aspectRatio,
     quality,
   });
+});
+
+// Plan storyboard keyframes quickly (<2.5s) for ZeroGPU-independent Tier 5 video fallback
+app.post('/api/video-storyboard', async (req, res) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+  const frameCount = Number(req.body?.frameCount) === 2 ? 2 : 3;
+  if (!prompt) {
+    return res.status(400).json({ error: 'prompt is required' });
+  }
+  try {
+    const framePrompts = await planVideoStoryboardFrames(prompt, frameCount);
+    return res.json({ framePrompts });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Unable to plan storyboard frames.' });
+  }
 });
 
 // Start async Text-to-Video job immediately (< 5ms response prevents any Cloud Run 60s HTTP timeout)

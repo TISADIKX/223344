@@ -11,6 +11,13 @@ import { AuthModal } from './components/AuthModal';
 import { ProfileModal } from './components/ProfileModal';
 import { VoiceAudioPlayer } from './components/VoiceAudioPlayer';
 import {
+  applyCanvasPhotoFilterPlan,
+  composeStoryboardVideoInBrowser,
+  editPhotoDirectlyInBrowser,
+  generatePhotoDirectlyInBrowser,
+  pollAiHordeImageInBrowser,
+} from './lib/mediaFallback';
+import {
   auth,
   onAuthStateChanged,
   logOutFromFirebase,
@@ -739,7 +746,9 @@ export default function App() {
 
   // Preload mastered MP4 into RAM Blob URL so playback is 100% lag-free with zero network buffering
   const preloadVideoInMemory = async (url: string): Promise<void> => {
-    if (!url || videoBlobUrlsRef.current[url]) return;
+    if (!url || url.startsWith('blob:') || url.startsWith('data:') || videoBlobUrlsRef.current[url]) {
+      return;
+    }
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
       if (!res.ok) return;
@@ -792,16 +801,20 @@ export default function App() {
     }
   };
 
-  // Download full 10s 16:9 MP4 video with music cleanly via Blob URL
+  // Download full 5s / 10s video cleanly via Blob URL
   const downloadVideo = async (url: string, filename: string) => {
     try {
       const res = await fetch(url);
       if (!res.ok) return;
       const blob = await res.blob();
+      const targetName =
+        blob.type.includes('webm') && filename.toLowerCase().endsWith('.mp4')
+          ? filename.replace(/\.mp4$/i, '.webm')
+          : filename;
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
-      a.download = filename;
+      a.download = targetName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1450,50 +1463,116 @@ export default function App() {
 
         let generatedUrl: string | null = null;
         let resolvedAspect: PhotoAspectRatio = selectedPhotoAspect;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const response = await fetch('/api/generate-image', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt: cleanPrompt,
-                aspectRatio: selectedPhotoAspect,
-                quality: selectedPhotoQuality,
-                ...(sourceImagePayload ? { sourceImage: sourceImagePayload } : {}),
-                ...(additionalImagesPayload ? { additionalImages: additionalImagesPayload } : {}),
-              }),
-              signal: AbortSignal.timeout(70000),
-            });
+        let serverCompiledPrompt: string | undefined;
+        let serverEditedPrompt: string | undefined;
+        let serverHordeJobId: string | undefined;
+        let serverEditStrength = 0.58;
 
-            if (response.ok) {
-              const data = await response.json();
-              const imageUrl = data?.imageUrl;
-              if (
-                data?.aspectRatio === '1:1' ||
-                data?.aspectRatio === '16:9' ||
-                data?.aspectRatio === '9:16' ||
-                data?.aspectRatio === '4:3' ||
-                data?.aspectRatio === '3:4'
-              ) {
-                resolvedAspect = data.aspectRatio;
-              }
-              if (imageUrl && imageUrl.startsWith('data:image/')) {
-                await preloadImage(imageUrl, 5000);
+        try {
+          const response = await fetch('/api/generate-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: cleanPrompt,
+              aspectRatio: selectedPhotoAspect,
+              quality: selectedPhotoQuality,
+              ...(sourceImagePayload ? { sourceImage: sourceImagePayload } : {}),
+              ...(additionalImagesPayload ? { additionalImages: additionalImagesPayload } : {}),
+            }),
+            signal: AbortSignal.timeout(20000),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            if (
+              data?.aspectRatio === '1:1' ||
+              data?.aspectRatio === '16:9' ||
+              data?.aspectRatio === '9:16' ||
+              data?.aspectRatio === '4:3' ||
+              data?.aspectRatio === '3:4'
+            ) {
+              resolvedAspect = data.aspectRatio;
+            }
+            if (typeof data?.compiledPrompt === 'string' && data.compiledPrompt) {
+              serverCompiledPrompt = data.compiledPrompt;
+            }
+            if (typeof data?.editedPrompt === 'string' && data.editedPrompt) {
+              serverEditedPrompt = data.editedPrompt;
+            }
+            if (typeof data?.hordeJobId === 'string' && data.hordeJobId) {
+              serverHordeJobId = data.hordeJobId;
+            }
+
+            const imageUrl = data?.imageUrl;
+            if (imageUrl && imageUrl.startsWith('data:image/')) {
+              await preloadImage(imageUrl, 5000);
+              generatedUrl = imageUrl;
+            } else if (imageUrl && imageUrl.startsWith('http')) {
+              const isLoaded = await preloadImage(imageUrl);
+              if (isLoaded) {
                 generatedUrl = imageUrl;
-                break;
-              } else if (imageUrl && imageUrl.startsWith('http')) {
-                const isLoaded = await preloadImage(imageUrl);
-                if (isLoaded) {
-                  generatedUrl = imageUrl;
-                  break;
-                }
+              }
+            } else if (data?.filterPlan && sourceImagePayload) {
+              const filteredUrl = await applyCanvasPhotoFilterPlan(
+                sourceImagePayload.data,
+                sourceImagePayload.mimeType,
+                data.filterPlan,
+                resolvedAspect,
+                selectedPhotoQuality
+              );
+              if (filteredUrl) {
+                await preloadImage(filteredUrl, 4000);
+                generatedUrl = filteredUrl;
               }
             }
-          } catch {
-            // Transient fetch hiccup; retry once below
           }
-          if (attempt < 1) {
-            await new Promise((r) => setTimeout(r, 900));
+        } catch {
+          // Server endpoint timed out or errored on Vercel; seamlessly hand off to browser direct failover below
+        }
+
+        // Browser-side async failover (bypasses Vercel 10s/60s timeouts and shared AWS IP ZeroGPU limits)
+        if (!generatedUrl) {
+          if (isPhotoEditRequest && sourceImagePayload) {
+            if (serverHordeJobId) {
+              generatedUrl = await pollAiHordeImageInBrowser(serverHordeJobId, 48000);
+            }
+            if (!generatedUrl) {
+              generatedUrl = await editPhotoDirectlyInBrowser(
+                sourceImagePayload.data,
+                cleanPrompt,
+                resolvedAspect,
+                serverEditedPrompt,
+                serverEditStrength
+              );
+            }
+          } else {
+            const racers: Array<Promise<string>> = [
+              generatePhotoDirectlyInBrowser(
+                cleanPrompt,
+                resolvedAspect,
+                selectedPhotoQuality,
+                serverCompiledPrompt
+              ).then((u) => {
+                if (!u) throw new Error('direct_empty');
+                return u;
+              }),
+            ];
+            if (serverHordeJobId) {
+              racers.push(
+                pollAiHordeImageInBrowser(serverHordeJobId, 48000).then((u) => {
+                  if (!u) throw new Error('horde_poll_empty');
+                  return u;
+                })
+              );
+            }
+            try {
+              generatedUrl = await Promise.any(racers);
+            } catch {
+              generatedUrl = null;
+            }
+          }
+          if (generatedUrl) {
+            await preloadImage(generatedUrl, 6000);
           }
         }
 
@@ -1647,12 +1726,10 @@ export default function App() {
                 try {
                   await reader.cancel();
                 } catch {}
-                const isQuotaOrBlocked =
-                  /ZeroGPU quota|exceeded your.*quota/i.test(sseText) ||
-                  /event:\s*error\s*\r?\n\s*data:\s*null\b/i.test(sseText);
+                const isExplicitQuota = /ZeroGPU quota|exceeded your.*quota/i.test(sseText);
                 return {
                   url: null,
-                  quotaExceeded: isQuotaOrBlocked,
+                  quotaExceeded: isExplicitQuota,
                 };
               }
             }
@@ -1746,8 +1823,8 @@ export default function App() {
         );
         finalVideoUrl = tier1Result.url;
 
-        // Only probe secondary/tertiary ZeroGPU Spaces if browser ZeroGPU quota wasn't exhausted on Tier 1
-        if (!finalVideoUrl && !tier1Result.quotaExceeded) {
+        // Try Tier 2, Tier 3, and Tier 4 directly in browser whenever an earlier tier fails (no premature quota skip!)
+        if (!finalVideoUrl) {
           // 2. Secondary: Wan-AI/Wan2.2-TI2V-5B (Native 24fps 5.0s = 120 native frames @ 832x480 / 480x832 / 640x640)
           const [wanH, wanW] =
             selectedAspect === '9:16'
@@ -1776,7 +1853,7 @@ export default function App() {
           finalVideoUrl = tier2Result.url;
 
           // 3. Tertiary: rCM-Wan 2.1 14B Text-to-Video (77 native frames, 4 steps)
-          if (!finalVideoUrl && !tier2Result.quotaExceeded) {
+          if (!finalVideoUrl) {
             const tier3Result = await callWanSpaceAndMaster(
               'https://yujiwang0606-rcm-wan.hf.space',
               '/generate_videos',
@@ -1794,11 +1871,29 @@ export default function App() {
             );
             finalVideoUrl = tier3Result.url;
           }
+
+          // 4. Fourth Browser Tier: Wan-AI/Wan2.1-T2V-1.3B Base
+          if (!finalVideoUrl) {
+            const [w1W, w1H] =
+              selectedAspect === '9:16'
+                ? [480, 832]
+                : selectedAspect === '1:1'
+                ? [640, 640]
+                : [832, 480];
+            const tier4BrowserResult = await callWanSpaceAndMaster(
+              'https://numanajmal0-wan-video-api.hf.space',
+              '/generate',
+              ['wan-base', wanPrompt, wanNeg, w1W, w1H, 49, 18, 5, -1, 1, null],
+              22,
+              81
+            );
+            finalVideoUrl = tier4BrowserResult.url;
+          }
         }
 
-        // 4. Server-authenticated Wan + dedicated GPU/storyboard video failover
+        // 5. Server-authenticated Wan failover (/api/generate-video -> /api/generate-video/status/:jobId)
         let serverJobFinishedWithFailure = false;
-        for (let jobAttempt = 0; jobAttempt < 2 && !finalVideoUrl && !serverJobFinishedWithFailure; jobAttempt++) {
+        for (let jobAttempt = 0; jobAttempt < 1 && !finalVideoUrl && !serverJobFinishedWithFailure; jobAttempt++) {
           try {
             const startRes = await fetch('/api/generate-video', {
               method: 'POST',
@@ -1809,7 +1904,7 @@ export default function App() {
                 aspectRatio: selectedAspect,
                 quality: selectedQuality,
               }),
-              signal: AbortSignal.timeout(20000),
+              signal: AbortSignal.timeout(15000),
             });
 
             if (!startRes.ok) continue;
@@ -1823,6 +1918,7 @@ export default function App() {
             let activeJobId = startData?.jobId;
             if (!activeJobId) continue;
 
+            let consecutiveServerErrors = 0;
             for (let pollIdx = 0; pollIdx < 240; pollIdx++) {
               await new Promise((r) => setTimeout(r, 950));
               try {
@@ -1831,8 +1927,11 @@ export default function App() {
                 });
                 if (!pollRes.ok) {
                   if (pollRes.status === 404) break;
+                  consecutiveServerErrors += 1;
+                  if (consecutiveServerErrors >= 2) break;
                   continue;
                 }
+                consecutiveServerErrors = 0;
                 const pollData = await pollRes.json();
                 if (typeof pollData?.nextJobId === 'string' && pollData.nextJobId) {
                   activeJobId = pollData.nextJobId;
@@ -1849,11 +1948,70 @@ export default function App() {
                   break;
                 }
               } catch {
-                // Ignore transient network poll hiccup and continue polling
+                consecutiveServerErrors += 1;
+                if (consecutiveServerErrors >= 2) break;
               }
             }
           } catch {
-            // Retry starting job once if initial POST had a transient network hiccup
+            // Fall through cleanly to Tier 5 ZeroGPU-independent Storyboard Motion Compositor
+          }
+        }
+
+        // 6. Tier 5 ZeroGPU-independent Xkiro-SenseNova Storyboard Motion fallback (ensures Vercel never fails when ZeroGPU quota is exhausted)
+        if (!finalVideoUrl) {
+          advanceVideoFloor(32);
+          const frameCount = selectedDuration === 5 ? 2 : 3;
+          let framePrompts: string[] = [];
+          try {
+            const sbRes = await fetch('/api/video-storyboard', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prompt: cleanPrompt, frameCount }),
+              signal: AbortSignal.timeout(8000),
+            });
+            if (sbRes.ok) {
+              const sbJson = await sbRes.json();
+              if (Array.isArray(sbJson?.framePrompts) && sbJson.framePrompts.length > 0) {
+                framePrompts = sbJson.framePrompts;
+              }
+            }
+          } catch {}
+
+          if (framePrompts.length === 0) {
+            framePrompts =
+              frameCount === 2
+                ? [
+                    `Cinematic 35mm establishing wide shot of ${cleanPrompt}, natural lighting, authentic live-action photography`,
+                    `Cinematic 35mm dynamic continuation of ${cleanPrompt} in motion, golden rim lighting, rich detail, authentic live-action photography`,
+                  ]
+                : [
+                    `Cinematic 35mm opening wide shot of ${cleanPrompt}, atmospheric natural lighting, authentic live-action photography`,
+                    `Cinematic 35mm mid-action tracking shot of ${cleanPrompt}, crisp motion detail, authentic live-action photography`,
+                    `Cinematic 35mm dramatic closing shot of ${cleanPrompt}, rich depth and ambient light, authentic live-action photography`,
+                  ];
+          }
+
+          advanceVideoFloor(42);
+          const kfPhotoAspect: PhotoAspectRatio = selectedAspect;
+          const kfPhotoQuality: PhotoQuality = selectedQuality === '1080p' ? 'hd' : 'standard';
+          let completedKf = 0;
+          const kfUrls = await Promise.all(
+            framePrompts.slice(0, frameCount).map(async (fp) => {
+              const imgUrl = await generatePhotoDirectlyInBrowser(fp, kfPhotoAspect, kfPhotoQuality, fp);
+              completedKf += 1;
+              advanceVideoFloor(42 + Math.round((completedKf / frameCount) * 34));
+              return imgUrl;
+            })
+          );
+          const validKfUrls = kfUrls.filter((u): u is string => Boolean(u));
+          if (validKfUrls.length > 0) {
+            finalVideoUrl = await composeStoryboardVideoInBrowser(
+              validKfUrls,
+              selectedDuration,
+              selectedAspect,
+              selectedQuality,
+              advanceVideoFloor
+            );
           }
         }
 
