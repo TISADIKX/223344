@@ -8,14 +8,19 @@ $curlDetails = $curlInstalled ? curl_version() : null;
 
 $outboundTest = false;
 if ($curlInstalled) {
-    $ch = curl_init("https://api.xkiro.com/v1/models");
+    $token = getenv("HF_ACCESS_TOKEN") ?: (getenv("HF_TOKEN") ?: "");
+    $ch = curl_init("https://router.huggingface.co/v1/models");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 6);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Bearer sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd"]);
+    $headers = [];
+    if (!empty($token)) {
+        $headers[] = "Authorization: Bearer " . $token;
+    }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     $res = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    $outboundTest = ($httpCode === 200);
+    $outboundTest = ($httpCode === 200 || $httpCode === 401);
 }
 
 echo json_encode([

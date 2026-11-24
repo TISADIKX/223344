@@ -69,8 +69,8 @@ export const VoiceAudioPlayer: React.FC<VoiceAudioPlayerProps> = ({
     <div
       className={`flex items-center gap-2.5 select-none ${
         compact
-          ? 'bg-[#1a1c24] border border-white/10 rounded-xl px-2.5 py-1.5 w-full sm:w-auto sm:min-w-[250px]'
-          : 'bg-[#15171e] border border-white/10 rounded-xl px-3 py-2 min-w-[216px] sm:min-w-[252px]'
+          ? 'bg-[#323232] border border-white/10 rounded-xl px-2.5 py-1.5 w-full sm:w-auto sm:min-w-[250px]'
+          : 'bg-[#252525] border border-white/10 rounded-xl px-3 py-2 min-w-[216px] sm:min-w-[252px]'
       }`}
     >
       <audio

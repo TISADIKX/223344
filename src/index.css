@@ -7,7 +7,7 @@
 
 body {
   font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background-color: #0b0c0f;
+  background-color: #191919;
   overflow-x: hidden;
 }
 
@@ -58,14 +58,14 @@ body {
   100% { background-position: 200% 0; }
 }
 .thinking-shimmer {
-  background: linear-gradient(90deg, #8e918f 0%, #f1f3f4 50%, #8e918f 100%);
+  background: linear-gradient(90deg, #9a9a9a 0%, #f1f1f1 50%, #9a9a9a 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: shimmer 2s infinite linear;
 }
 
-/* Dark Luminous Media Creation Card (matches reference photo creation flow) */
+/* Charcoal Gray Luminous Media Creation Card */
 @keyframes mediaSurfaceSweep {
   0% {
     background-position: 100% 100%;
@@ -81,11 +81,11 @@ body {
 .media-creation-surface {
   background: linear-gradient(
     135deg,
-    #0d0e12 0%,
-    #14161d 28%,
-    #252833 50%,
-    #15171f 72%,
-    #0d0e12 100%
+    #1f1f1f 0%,
+    #262626 28%,
+    #353535 50%,
+    #262626 72%,
+    #1f1f1f 100%
   );
   background-size: 260% 260%;
   animation: mediaSurfaceSweep 3.2s ease-in-out infinite;
@@ -131,16 +131,87 @@ body {
   animation: voiceWaveBar 0.85s ease-in-out infinite;
 }
 
-/* Neutral Dark Buttons */
+/* Gentle levitation for empty-state emblem */
+@keyframes ambientFloat {
+  0%, 100% {
+    transform: translateY(0px) scale(1);
+  }
+  50% {
+    transform: translateY(-7px) scale(1.025);
+  }
+}
+.ambient-float {
+  animation: ambientFloat 5.5s ease-in-out infinite;
+}
+
+/* Soft radial breath behind empty-state emblem */
+@keyframes ambientAura {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.95);
+  }
+  50% {
+    opacity: 0.65;
+    transform: scale(1.08);
+  }
+}
+.ambient-aura {
+  animation: ambientAura 6s ease-in-out infinite;
+}
+
+/* Staggered 3-dot wave for Thinking indicator */
+@keyframes thinkingDotWave {
+  0%, 80%, 100% {
+    transform: translateY(0) scale(0.75);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-4px) scale(1.1);
+    opacity: 1;
+  }
+}
+.thinking-dot {
+  animation: thinkingDotWave 1.15s ease-in-out infinite;
+}
+
+@keyframes fadeInScale {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-fade-in {
+  animation: fadeInScale 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Neutral Gray Buttons */
 .neutral-btn {
-  background-color: #1a1c22;
+  background-color: #323232;
   color: #e3e3e3;
   border: none !important;
-  transition: background-color 0.2s ease;
+  transition: background-color 0.18s ease, transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), color 0.18s ease;
 }
 .neutral-btn:hover {
-  background-color: #262932;
+  background-color: #3e3e3e;
   color: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-float,
+  .ambient-aura,
+  .thinking-dot,
+  .voice-wave-bar,
+  .rotating-conic-glow,
+  .rotating-conic-sharp,
+  .media-creation-surface,
+  .creation-sparkle,
+  .thinking-shimmer {
+    animation: none !important;
+  }
 }
 
 /* AI STYLISH MARKDOWN & TABLES */
@@ -149,12 +220,12 @@ body {
 .ai-output h3 { font-size: 1.05rem; font-weight: 600; color: #fff; margin: 0.8rem 0 0.35rem; }
 .ai-output p { margin-bottom: 0.65rem; line-height: 1.68; color: #e3e3e3; }
 .ai-output strong { font-weight: 600; color: #fff; }
-.ai-output em { color: #d1d5db; font-style: italic; }
+.ai-output em { color: #d4d4d4; font-style: italic; }
 .ai-output ul { list-style-type: disc; padding-left: 1.3rem; margin-bottom: 0.8rem; }
 .ai-output ol { list-style-type: decimal; padding-left: 1.3rem; margin-bottom: 0.8rem; }
 .ai-output li { margin-bottom: 0.25rem; color: #e3e3e3; }
-.ai-output blockquote { border-left: 3px solid #118ab2; padding: 0.5rem 0.85rem; background: rgba(17,138,178,0.1); border-radius: 0 0.5rem 0.5rem 0; margin: 0.85rem 0; color: #cbd5e1; }
-.ai-output hr { border-color: rgba(255,255,255,0.08); margin: 1.25rem 0; }
+.ai-output blockquote { border: 1px solid rgba(255,255,255,0.1); padding: 0.55rem 0.85rem; background: #252525; border-radius: 0.5rem; margin: 0.85rem 0; color: #d4d4d4; }
+.ai-output hr { border-color: rgba(255,255,255,0.1); margin: 1.25rem 0; }
 
 .ai-output table {
   width: 100%;
@@ -163,33 +234,33 @@ body {
   font-size: 0.84rem;
   border-radius: 0.75rem;
   overflow: hidden;
-  background: #14161d;
-  border: 1px solid rgba(255,255,255,0.07);
+  background: #222222;
+  border: 1px solid rgba(255,255,255,0.1);
   display: block;
   overflow-x: auto;
 }
 .ai-output th {
-  background: #1c1f28;
+  background: #2c2c2c;
   padding: 0.65rem 0.85rem;
   text-align: left;
   font-weight: 600;
   color: #fff;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid rgba(255,255,255,0.1);
   white-space: nowrap;
 }
 .ai-output td {
   padding: 0.6rem 0.85rem;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
-  color: #d1d5db;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  color: #d4d4d4;
   vertical-align: top;
   line-height: 1.5;
 }
 .ai-output tr:last-child td { border-bottom: none; }
-.ai-output tr:hover td { background: rgba(255,255,255,0.02); }
+.ai-output tr:hover td { background: rgba(255,255,255,0.03); }
 
-.ai-output code { background: #1c1f28; padding: 0.15rem 0.4rem; border-radius: 0.35rem; font-family: monospace; font-size: 0.86em; color: #e2e8f0; }
-.ai-output pre { background: #12141a; padding: 0.85rem 1rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.06); overflow-x: auto; margin: 0.85rem 0; }
-.ai-output pre code { background: transparent; padding: 0; color: #e2e8f0; }
+.ai-output code { background: #2e2e2e; padding: 0.15rem 0.4rem; border-radius: 0.35rem; font-family: monospace; font-size: 0.86em; color: #ececec; }
+.ai-output pre { background: #202020; padding: 0.85rem 1rem; border-radius: 0.75rem; border: 1px solid rgba(255,255,255,0.08); overflow-x: auto; margin: 0.85rem 0; }
+.ai-output pre code { background: transparent; padding: 0; color: #ececec; }
 
 /* NO WHITE FRAME / REMOVE NATIVE SCROLLBAR ARTIFACTS */
 ::-webkit-scrollbar {

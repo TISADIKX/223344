@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence, MotionConfig } from 'motion/react';
 import { marked } from 'marked';
 import { HistorySidebar } from './components/HistorySidebar';
 import { AuthModal } from './components/AuthModal';
@@ -89,8 +90,8 @@ const loadSavedGenerationSettings = (): GenerationSettings => {
 const MAX_VOICE_SECONDS = 300; // 5 minutes max voice recording duration
 const DAILY_TOKEN_LIMIT = 100_000; // 100k daily token allowance per logged-in user
 const TOKEN_RESET_INTERVAL_MS = 24 * 60 * 60 * 1000; // Resets every 24 hours
-const PHOTO_TOKEN_COST = 1_000; // 1k tokens per photo generation
-const VIDEO_TOKEN_COST = 2_000; // 2k tokens per video generation
+const PHOTO_TOKEN_COST = 500; // 500 tokens per photo generation
+const VIDEO_TOKEN_COST = 1_000; // 1k tokens per video generation
 
 const getTokenStorageKey = (email: string) =>
   `gutiai_token_allowance_${email.trim().toLowerCase()}`;
@@ -140,34 +141,95 @@ const formatResetCountdown = (resetAt: number, nowMs: number): string => {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 };
 
-// --- XKIRO API CONFIGURATION (Verified Multi-Model Cluster) ---
-const XKIRO_API_KEY = "sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd";
-const XKIRO_BASE_URL = "https://api.xkiro.com/v1/chat/completions";
-const XKIRO_MODEL = "mistralai/ministral-8b";
+// Strict per-user storage isolation helpers (no shared global chat history key)
+const getUserScopeKey = (user: UserAccount | null): string | null => {
+  if (!user) return null;
+  if (user.uid && user.uid.trim()) return `uid_${user.uid.trim()}`;
+  if (user.email && user.email.trim()) return `email_${user.email.trim().toLowerCase()}`;
+  return null;
+};
 
-// Default logged-in account information
-const DEFAULT_GOOGLE_USER: UserAccount = {
-  name: 'Gamertisk',
-  email: 'gamertisk@gmail.com',
+const getUserHistoryStorageKey = (scope: string) => `bloopx_chat_history_${scope}`;
+const getUserActiveSessionStorageKey = (scope: string) => `bloopx_active_session_${scope}`;
+
+const loadUserSessionsFromStorage = (scope: string): ChatSession[] => {
+  try {
+    const raw = localStorage.getItem(getUserHistoryStorageKey(scope));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s: any) => s && typeof s.id === 'string' && (!s.userId || s.userId === scope))
+      .map((s: any) => ({
+        ...s,
+        userId: scope,
+      }));
+  } catch (_e) {
+    return [];
+  }
+};
+
+const compactSessionForLocalStorage = (s: ChatSession): ChatSession => ({
+  ...s,
+  messages: (s.messages || []).map((m) => ({
+    ...m,
+    attachments: m.attachments?.map((att) =>
+      att.previewUrl && att.previewUrl.length > 45000
+        ? { ...att, previewUrl: '' }
+        : att
+    ),
+    generatedPhoto:
+      m.generatedPhoto && m.generatedPhoto.url.length > 150000
+        ? { ...m.generatedPhoto, url: '' }
+        : m.generatedPhoto,
+  })),
+});
+
+const saveUserSessionsToStorage = (scope: string, list: ChatSession[]) => {
+  const storageKey = getUserHistoryStorageKey(scope);
+  const scoped = list
+    .filter((s) => !s.userId || s.userId === scope)
+    .map((s) => ({ ...s, userId: scope }));
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(scoped));
+  } catch (_quotaErr) {
+    try {
+      // Keep latest 3 sessions intact and compact older inline base64 previews so history never silently drops
+      const compacted = scoped.map((s, idx) =>
+        idx < 3 ? s : compactSessionForLocalStorage(s)
+      );
+      localStorage.setItem(storageKey, JSON.stringify(compacted));
+    } catch (_secondErr) {
+      try {
+        const allCompacted = scoped.slice(0, 15).map(compactSessionForLocalStorage);
+        localStorage.setItem(storageKey, JSON.stringify(allCompacted));
+      } catch (_e) {}
+    }
+  }
+};
+
+const loadUserActiveSessionIdFromStorage = (scope: string): string | null => {
+  try {
+    return localStorage.getItem(getUserActiveSessionStorageKey(scope)) || null;
+  } catch (_e) {
+    return null;
+  }
+};
+
+const saveUserActiveSessionIdToStorage = (scope: string, sessionId: string | null) => {
+  try {
+    if (sessionId) {
+      localStorage.setItem(getUserActiveSessionStorageKey(scope), sessionId);
+    } else {
+      localStorage.removeItem(getUserActiveSessionStorageKey(scope));
+    }
+  } catch (_e) {}
 };
 
 export default function App() {
-  // Gemini-style Chat Sessions History
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    try {
-      const saved = localStorage.getItem('gutiai_chat_history');
-      if (saved) return JSON.parse(saved);
-    } catch (_e) {}
-    return [];
-  });
-
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('gutiai_active_session_id') || null;
-    } catch (_e) {
-      return null;
-    }
-  });
+  // Strictly per-user Chat Sessions History (never preloaded from a global shared key)
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
   // Responsive sidebar open/close state (overlay drawer, closed by default for full screen)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -221,6 +283,7 @@ export default function App() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordedVoice, setRecordedVoice] = useState<RecordedVoice | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Refs
   const chatCanvasRef = useRef<HTMLDivElement>(null);
@@ -236,73 +299,177 @@ export default function App() {
   const videoProgressFloorRef = useRef<number>(0);
   const videoTickCountRef = useRef<number>(0);
   const videoBlobUrlsRef = useRef<Record<string, string>>({});
+  const sessionsRef = useRef<ChatSession[]>([]);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const activeScopeRef = useRef<string | null>(null);
 
-  // Load saved user session, subscribe to Firebase Auth, and load active chat messages on mount
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const currentScope = getUserScopeKey(currentUser);
+
+  // Subscribe to Firebase Auth on mount & clear legacy shared un-scoped history keys
   useEffect(() => {
     initAnalytics().catch(() => {});
 
-    const savedUser = localStorage.getItem('gutiai_user_session');
-    if (savedUser) {
+    // Purge legacy un-scoped global history keys so old sessions never leak across accounts
+    try {
+      localStorage.removeItem('gutiai_chat_history');
+      localStorage.removeItem('gutiai_active_session_id');
+    } catch (_e) {}
+
+    let isMounted = true;
+    let authSettled = false;
+
+    const savedUserRaw = localStorage.getItem('gutiai_user_session');
+    if (savedUserRaw) {
       try {
-        setCurrentUser(JSON.parse(savedUser));
-      } catch (e) {
-        // Ignore JSON error
+        const parsed = JSON.parse(savedUserRaw);
+        if (parsed && (parsed.uid || parsed.email)) {
+          setCurrentUser(parsed);
+        }
+      } catch (_e) {
+        localStorage.removeItem('gutiai_user_session');
       }
+    }
+
+    if (typeof (auth as any).authStateReady === 'function') {
+      (auth as any).authStateReady().then(() => {
+        authSettled = true;
+        if (isMounted && !auth.currentUser) {
+          localStorage.removeItem('gutiai_user_session');
+          setCurrentUser(null);
+        }
+      }).catch(() => {});
     }
 
     // Subscribe to real-time Firebase Auth state changes
     const unsubscribeAuth = onAuthStateChanged(auth, (fbUser) => {
+      if (!isMounted) return;
       if (fbUser) {
         const user: UserAccount = {
           uid: fbUser.uid,
           name: fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : 'User'),
-          email: fbUser.email || 'gamertisk@gmail.com',
+          email: fbUser.email || '',
           avatarUrl: fbUser.photoURL || undefined,
         };
         setCurrentUser(user);
-        localStorage.setItem('gutiai_user_session', JSON.stringify(user));
-      } else {
-        const cached = localStorage.getItem('gutiai_user_session');
-        if (!cached) {
-          setCurrentUser(null);
-        }
+        try {
+          localStorage.setItem('gutiai_user_session', JSON.stringify(user));
+        } catch (_e) {}
+      } else if (authSettled) {
+        localStorage.removeItem('gutiai_user_session');
+        setCurrentUser(null);
       }
     });
 
-    if (activeSessionId) {
-      const active = sessions.find((s) => s.id === activeSessionId);
-      if (active && active.messages && active.messages.length > 0) {
-        setMessages(active.messages);
-        if (active.chatMode) {
-          setChatMode(active.chatMode);
-        }
-      }
-    }
-
     return () => {
+      isMounted = false;
       unsubscribeAuth();
     };
   }, []);
 
-  // Real-time synchronization of chat history with cloud Firestore database
+  // Strict per-account history isolation & real-time Firestore synchronization
   useEffect(() => {
-    const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
-    if (!effectiveUid) return;
+    const prevScope = activeScopeRef.current;
+    activeScopeRef.current = currentScope;
 
-    const unsubscribeSessions = subscribeToUserSessions(effectiveUid, (cloudSessions) => {
-      if (cloudSessions && cloudSessions.length > 0) {
-        setSessions(cloudSessions);
-        // Also keep local cache updated so conversations are instantly accessible offline
-        try {
-          localStorage.setItem('gutiai_chat_history', JSON.stringify(cloudSessions));
-        } catch (_e) {}
+    if (prevScope !== currentScope) {
+      // Clear previous account's transient workspace immediately on sign-out or account switch
+      setMessages([]);
+      setActiveSessionId(null);
+      setInputText('');
+      setAttachedFiles([]);
+      setRecordedVoice(null);
+      setActivePhotoIdx(null);
+      setIsThinking(false);
+      setPendingMode(null);
+      setVideoProgress(0);
+      setIsSidebarOpen(false);
+      setShowProfileModal(false);
+    }
+
+    if (!currentScope) {
+      sessionsRef.current = [];
+      setSessions([]);
+      return;
+    }
+
+    // Load only this specific user's scoped local cache while Firestore syncs
+    const scopedSessions = loadUserSessionsFromStorage(currentScope);
+    sessionsRef.current = scopedSessions;
+    setSessions(scopedSessions);
+
+    const savedActiveId = loadUserActiveSessionIdFromStorage(currentScope);
+    const matchingActive = savedActiveId
+      ? scopedSessions.find((s) => s.id === savedActiveId)
+      : undefined;
+
+    if (matchingActive) {
+      setActiveSessionId(matchingActive.id);
+      setMessages(matchingActive.messages || []);
+      if (matchingActive.chatMode) {
+        setChatMode(matchingActive.chatMode);
       }
-    });
+    } else {
+      setActiveSessionId(null);
+      setMessages([]);
+    }
+
+    const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
+    if (!effectiveUid || auth.currentUser?.uid !== effectiveUid) {
+      return;
+    }
+
+    const expectedScope = currentScope;
+    const unsubscribeSessions = subscribeToUserSessions(
+      effectiveUid,
+      (cloudSessions) => {
+        // Ignore stale snapshot if user already switched accounts
+        if (activeScopeRef.current !== expectedScope) return;
+
+        // Always treat this user's Firestore snapshot as authoritative (even when empty!)
+        // Preserve only brand-new local optimistic sessions created for THIS user in the last 10s
+        const now = Date.now();
+        const cloudIds = new Set(cloudSessions.map((s) => s.id));
+        const recentLocalOnly = sessionsRef.current.filter(
+          (s) =>
+            s.userId === expectedScope &&
+            !cloudIds.has(s.id) &&
+            now - (s.updatedAt || s.createdAt || 0) < 10000
+        );
+
+        const merged = [...recentLocalOnly, ...cloudSessions]
+          .map((s) => ({ ...s, userId: expectedScope }))
+          .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+
+        sessionsRef.current = merged;
+        setSessions(merged);
+        saveUserSessionsToStorage(expectedScope, merged);
+
+        const currentActiveId = activeSessionIdRef.current;
+        if (currentActiveId) {
+          const foundActive = merged.find((s) => s.id === currentActiveId);
+          if (!foundActive) {
+            setActiveSessionId(null);
+            setMessages([]);
+          }
+        }
+      },
+      (err) => {
+        console.warn('Firestore session listener warning:', err);
+      }
+    );
 
     return () => {
       unsubscribeSessions();
     };
-  }, [currentUser?.uid]);
+  }, [currentScope, currentUser?.uid]);
 
   // Automatically provision / sync 100k 24-hour token allowance whenever a user logs in
   useEffect(() => {
@@ -336,23 +503,17 @@ export default function App() {
     setNowTick(Date.now());
   };
 
-  // Persist sessions to localStorage
+  // Persist sessions strictly under the active user's scope
   useEffect(() => {
-    try {
-      localStorage.setItem('gutiai_chat_history', JSON.stringify(sessions));
-    } catch (_e) {}
-  }, [sessions]);
+    if (!currentScope) return;
+    saveUserSessionsToStorage(currentScope, sessions);
+  }, [sessions, currentScope]);
 
-  // Persist activeSessionId to localStorage
+  // Persist activeSessionId strictly under the active user's scope
   useEffect(() => {
-    try {
-      if (activeSessionId) {
-        localStorage.setItem('gutiai_active_session_id', activeSessionId);
-      } else {
-        localStorage.removeItem('gutiai_active_session_id');
-      }
-    } catch (_e) {}
-  }, [activeSessionId]);
+    if (!currentScope) return;
+    saveUserActiveSessionIdToStorage(currentScope, activeSessionId);
+  }, [activeSessionId, currentScope]);
 
   // Auto-scroll chat canvas
   useEffect(() => {
@@ -444,6 +605,16 @@ export default function App() {
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
+  // Sanitize rendered markdown HTML cleanly against raw script/event injection
+  const renderSafeMarkdown = (markdownText: string): string => {
+    const rawHtml = marked.parse(markdownText || '') as string;
+    return rawHtml
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<\/?(?:iframe|object|embed|form)[^>]*>/gi, '')
+      .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/(href|src)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, '$1="#"');
+  };
+
   // Convert File to Base64
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -455,6 +626,84 @@ export default function App() {
       };
       reader.onerror = (error) => reject(error);
       reader.readAsDataURL(file);
+    });
+  };
+
+  const detectClosestPhotoAspect = (w: number, h: number): PhotoAspectRatio => {
+    if (!w || !h) return '1:1';
+    const r = w / h;
+    const opts: Array<{ aspect: PhotoAspectRatio; val: number }> = [
+      { aspect: '1:1', val: 1 },
+      { aspect: '16:9', val: 16 / 9 },
+      { aspect: '9:16', val: 9 / 16 },
+      { aspect: '4:3', val: 4 / 3 },
+      { aspect: '3:4', val: 3 / 4 },
+    ];
+    return opts.reduce((best, cur) =>
+      Math.abs(r - cur.val) < Math.abs(r - best.val) ? cur : best
+    ).aspect;
+  };
+
+  // Optimize & encode uploaded image cleanly to persistent Data URL + aspect ratio
+  const prepareImageAttachment = (
+    file: File
+  ): Promise<{ previewUrl: string; base64Data: string; mimeType: string; aspectRatio: PhotoAspectRatio }> => {
+    return new Promise((resolve, reject) => {
+      const tempBlob = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const naturalW = img.naturalWidth || 512;
+          const naturalH = img.naturalHeight || 512;
+          const aspectRatio = detectClosestPhotoAspect(naturalW, naturalH);
+          const maxDim = 1400;
+          const scale = Math.max(naturalW, naturalH) > maxDim ? maxDim / Math.max(naturalW, naturalH) : 1;
+          const targetW = Math.max(1, Math.round(naturalW * scale));
+          const targetH = Math.max(1, Math.round(naturalH * scale));
+
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error('Canvas unavailable');
+
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          const outMime = 'image/jpeg';
+          const dataUrl = canvas.toDataURL(outMime, 0.88);
+          const base64Data = dataUrl.split(',')[1] || '';
+          URL.revokeObjectURL(tempBlob);
+          if (!base64Data) throw new Error('Empty canvas output');
+          resolve({ previewUrl: dataUrl, base64Data, mimeType: outMime, aspectRatio });
+        } catch (err) {
+          URL.revokeObjectURL(tempBlob);
+          fileToBase64(file)
+            .then((b64) => {
+              const mime = file.type || 'image/jpeg';
+              resolve({
+                previewUrl: `data:${mime};base64,${b64}`,
+                base64Data: b64,
+                mimeType: mime,
+                aspectRatio: '1:1',
+              });
+            })
+            .catch(reject);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(tempBlob);
+        fileToBase64(file)
+          .then((b64) => {
+            const mime = file.type || 'image/jpeg';
+            resolve({
+              previewUrl: `data:${mime};base64,${b64}`,
+              base64Data: b64,
+              mimeType: mime,
+              aspectRatio: '1:1',
+            });
+          })
+          .catch(reject);
+      };
+      img.src = tempBlob;
     });
   };
 
@@ -565,12 +814,23 @@ export default function App() {
     const filesArray = Array.from(files);
     if (filesArray.length === 0) return;
 
+    setUploadError(null);
     const currentPhotos = attachedFiles.filter(f => f.type === 'image');
     const currentVideos = attachedFiles.filter(f => f.type === 'video');
 
     const newPhotos = filesArray.filter(f => f.type.startsWith('image/'));
     const newVideos = filesArray.filter(f => f.type.startsWith('video/'));
-    const otherFiles = filesArray.filter(f => !f.type.startsWith('image/') && !f.type.startsWith('video/'));
+    const unsupportedFiles = filesArray.filter(
+      f => !f.type.startsWith('image/') && !f.type.startsWith('video/')
+    );
+
+    if (unsupportedFiles.length > 0 && newPhotos.length === 0 && newVideos.length === 0) {
+      setUploadError('Please select an image or video file (PNG, JPG, WebP, or MP4).');
+      return;
+    }
+    if (unsupportedFiles.length > 0) {
+      setUploadError('Skipped unsupported file(s). Only image and video files can be attached.');
+    }
 
     const filesToAdd: File[] = [];
 
@@ -584,34 +844,53 @@ export default function App() {
       filesToAdd.push(newVideos[0]);
     }
 
-    if (otherFiles.length > 0) {
-      filesToAdd.push(...otherFiles);
-    }
-
     const processedMedia: AttachedMedia[] = [];
     for (const file of filesToAdd) {
       const isVideo = file.type.startsWith('video/');
-      const previewUrl = URL.createObjectURL(file);
-      const base64Data = await fileToBase64(file);
-
-      processedMedia.push({
-        id: `${file.name}-${Date.now()}-${Math.random()}`,
-        file,
-        name: file.name,
-        mimeType: file.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
-        type: isVideo ? 'video' : 'image',
-        previewUrl,
-        base64Data,
-      });
+      if (isVideo) {
+        if (file.size > 25 * 1024 * 1024) {
+          setUploadError(`Video "${file.name}" is larger than 25MB. Please pick a smaller video.`);
+          continue;
+        }
+        const previewUrl = URL.createObjectURL(file);
+        const base64Data = await fileToBase64(file);
+        processedMedia.push({
+          id: `${file.name}-${Date.now()}-${Math.random()}`,
+          file,
+          name: file.name,
+          mimeType: file.type || 'video/mp4',
+          type: 'video',
+          previewUrl,
+          base64Data,
+        });
+      } else {
+        try {
+          const prepared = await prepareImageAttachment(file);
+          processedMedia.push({
+            id: `${file.name}-${Date.now()}-${Math.random()}`,
+            file,
+            name: file.name,
+            mimeType: prepared.mimeType,
+            type: 'image',
+            previewUrl: prepared.previewUrl,
+            base64Data: prepared.base64Data,
+            aspectRatio: prepared.aspectRatio,
+          });
+        } catch (_imgErr) {
+          setUploadError(`Could not read "${file.name}". Please try another photo.`);
+        }
+      }
     }
 
-    setAttachedFiles(prev => [...prev, ...processedMedia]);
+    if (processedMedia.length > 0) {
+      setAttachedFiles(prev => [...prev, ...processedMedia]);
+    }
   };
 
   const removeAttachedFile = (id: string) => {
     setAttachedFiles(prev => {
       const target = prev.find(item => item.id === id);
-      if (target?.previewUrl) {
+      if (target?.previewUrl && target.previewUrl.startsWith('blob:')) {
         URL.revokeObjectURL(target.previewUrl);
       }
       return prev.filter(item => item.id !== id);
@@ -763,59 +1042,70 @@ export default function App() {
     }
   };
 
-  // Google Login handling
-  const handleGoogleLogin = () => {
-    setIsLoggingIn(true);
-    setTimeout(() => {
-      setCurrentUser(DEFAULT_GOOGLE_USER);
-      localStorage.setItem('gutiai_user_session', JSON.stringify(DEFAULT_GOOGLE_USER));
-      setIsLoggingIn(false);
-      setShowLoginModal(false);
-    }, 400);
-  };
-
   const handleLogout = async () => {
+    if (isRecording) stopRecording(true);
+    discardRecordedVoice();
     try {
       await logOutFromFirebase();
     } catch (_e) {}
-    setCurrentUser(null);
     localStorage.removeItem('gutiai_user_session');
+    activeScopeRef.current = null;
+    sessionsRef.current = [];
+    setCurrentUser(null);
+    setTokenAllowance(null);
+    setSessions([]);
+    setMessages([]);
+    setActiveSessionId(null);
+    setInputText('');
+    setAttachedFiles([]);
+    setActivePhotoIdx(null);
+    setIsThinking(false);
+    setPendingMode(null);
+    setVideoProgress(0);
+    setIsSidebarOpen(false);
+    setShowProfileModal(false);
   };
 
-  // Helper to sync or create a session in history
-  // Helper to sync or create a session in history and persist permanently to Firestore database
+  // Helper to sync or create a session strictly scoped to the active user and persist to Firestore
   const syncSession = (sessId: string, updatedMsgs: Message[], fallbackTitle?: string) => {
-    let sessionToSave: ChatSession | null = null;
-    setSessions((prev) => {
-      const idx = prev.findIndex((s) => s.id === sessId);
-      if (idx !== -1) {
-        const updated = [...prev];
-        const updatedSession = {
-          ...updated[idx],
-          messages: updatedMsgs,
-          updatedAt: Date.now(),
-        };
-        updated[idx] = updatedSession;
-        sessionToSave = updatedSession;
-        return updated;
-      } else {
-        const title = fallbackTitle || 'New chat';
-        const newSession: ChatSession = {
-          id: sessId,
-          title,
-          messages: updatedMsgs,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          chatMode,
-        };
-        sessionToSave = newSession;
-        return [newSession, ...prev];
-      }
-    });
+    const scope = activeScopeRef.current || getUserScopeKey(currentUser);
+    if (!scope) return;
 
-    // Save permanently to cloud Firestore database
+    const existingList = sessionsRef.current;
+    const idx = existingList.findIndex((s) => s.id === sessId);
+    let sessionToSave: ChatSession;
+    let nextList: ChatSession[];
+
+    if (idx !== -1) {
+      sessionToSave = {
+        ...existingList[idx],
+        userId: scope,
+        messages: updatedMsgs,
+        updatedAt: Date.now(),
+      };
+      nextList = [...existingList];
+      nextList[idx] = sessionToSave;
+    } else {
+      const title = (fallbackTitle || 'New chat').trim().slice(0, 100) || 'New chat';
+      sessionToSave = {
+        id: sessId,
+        userId: scope,
+        title,
+        messages: updatedMsgs,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        chatMode,
+      };
+      nextList = [sessionToSave, ...existingList];
+    }
+
+    sessionsRef.current = nextList;
+    setSessions(nextList);
+    saveUserSessionsToStorage(scope, nextList);
+
+    // Save permanently to cloud Firestore database for this authenticated user only
     const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
-    if (effectiveUid && sessionToSave) {
+    if (effectiveUid && auth.currentUser?.uid === effectiveUid) {
       saveSessionToFirestore(effectiveUid, sessionToSave).catch((err) => {
         console.warn('Could not save session to cloud database:', err);
       });
@@ -839,6 +1129,10 @@ export default function App() {
   };
 
   const handleSelectSession = (session: ChatSession) => {
+    const scope = activeScopeRef.current || getUserScopeKey(currentUser);
+    if (session.userId && scope && session.userId !== scope) {
+      return;
+    }
     if (isRecording) stopRecording(true);
     discardRecordedVoice();
     setActiveSessionId(session.id);
@@ -858,39 +1152,71 @@ export default function App() {
   };
 
   const handleRenameSession = (sessionId: string, newTitle: string) => {
+    const scope = activeScopeRef.current || getUserScopeKey(currentUser);
+    if (!scope) return;
+
+    const cleanTitle = newTitle.trim().slice(0, 100);
+    if (!cleanTitle) return;
+
     let sessionToSave: ChatSession | null = null;
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id === sessionId) {
-          const updated = { ...s, title: newTitle, updatedAt: Date.now() };
-          sessionToSave = updated;
-          return updated;
-        }
-        return s;
-      })
-    );
+    const nextList = sessionsRef.current.map((s) => {
+      if (s.id === sessionId) {
+        const updated: ChatSession = {
+          ...s,
+          userId: scope,
+          title: cleanTitle,
+          updatedAt: Date.now(),
+        };
+        sessionToSave = updated;
+        return updated;
+      }
+      return s;
+    });
+
+    sessionsRef.current = nextList;
+    setSessions(nextList);
+    saveUserSessionsToStorage(scope, nextList);
 
     const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
-    if (effectiveUid && sessionToSave) {
+    if (effectiveUid && auth.currentUser?.uid === effectiveUid && sessionToSave) {
       saveSessionToFirestore(effectiveUid, sessionToSave).catch(() => {});
     }
   };
 
   const handleDeleteSession = (sessionId: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    const scope = activeScopeRef.current || getUserScopeKey(currentUser);
+    const nextList = sessionsRef.current.filter((s) => s.id !== sessionId);
+    sessionsRef.current = nextList;
+    setSessions(nextList);
+    if (scope) {
+      saveUserSessionsToStorage(scope, nextList);
+    }
     if (activeSessionId === sessionId) {
       handleNewChat();
     }
 
     const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
-    if (effectiveUid) {
+    if (effectiveUid && auth.currentUser?.uid === effectiveUid) {
       deleteSessionFromFirestore(effectiveUid, sessionId).catch(() => {});
     }
   };
 
   const handleClearAllSessions = () => {
+    const scope = activeScopeRef.current || getUserScopeKey(currentUser);
+    const toDelete = [...sessionsRef.current];
+    sessionsRef.current = [];
     setSessions([]);
+    if (scope) {
+      saveUserSessionsToStorage(scope, []);
+    }
     handleNewChat();
+
+    const effectiveUid = currentUser?.uid || auth.currentUser?.uid;
+    if (effectiveUid && auth.currentUser?.uid === effectiveUid) {
+      toDelete.forEach((s) => {
+        deleteSessionFromFirestore(effectiveUid, s.id).catch(() => {});
+      });
+    }
   };
 
   // Submit Prompt / Voice to AI
@@ -924,11 +1250,63 @@ export default function App() {
       });
     }
 
+    const attachedImagesForPhotoEdit = currentAttachments.filter(
+      (a) => a.type === 'image' && Boolean(a.base64Data)
+    );
+
+    // If user didn't attach a new photo right now in Photo mode, check if they're explicitly asking to edit the latest photo in this chat
+    let referencedPreviousPhoto: { data: string; mimeType: string; aspectRatio?: PhotoAspectRatio } | null = null;
+    if (
+      chatMode === 'photo' &&
+      attachedImagesForPhotoEdit.length === 0 &&
+      /\b(?:this|the|that|previous|last|above)\s+(?:photo|image|picture)\b|\b(?:edit|change|turn|make|crop|rotate|filter)\s+it\b/i.test(
+        text
+      )
+    ) {
+      for (let mIdx = messages.length - 1; mIdx >= 0; mIdx--) {
+        const prevMsg = messages[mIdx];
+        if (prevMsg.generatedPhoto?.url?.startsWith('data:image/')) {
+          const parts = prevMsg.generatedPhoto.url.split(',');
+          const mimeMatch = parts[0].match(/:(.*?);/);
+          if (parts[1]) {
+            referencedPreviousPhoto = {
+              data: parts[1],
+              mimeType: mimeMatch?.[1] || 'image/jpeg',
+              aspectRatio: prevMsg.generatedPhoto.aspectRatio,
+            };
+            break;
+          }
+        }
+        const prevImgAtt = prevMsg.attachments?.find(
+          (att) => att.type === 'image' && att.previewUrl?.startsWith('data:image/')
+        );
+        if (prevImgAtt) {
+          const parts = prevImgAtt.previewUrl.split(',');
+          const mimeMatch = parts[0].match(/:(.*?);/);
+          if (parts[1]) {
+            referencedPreviousPhoto = {
+              data: parts[1],
+              mimeType: mimeMatch?.[1] || 'image/jpeg',
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    const isPhotoEditRequest =
+      chatMode === 'photo' &&
+      (attachedImagesForPhotoEdit.length > 0 || referencedPreviousPhoto !== null);
+
     let userPrompt = text;
     if (!userPrompt && !currentVoice && currentAttachments.length > 0) {
-      userPrompt = currentAttachments.some((a) => a.type === 'video')
-        ? 'Please analyze this video and explain its key content.'
-        : 'Please examine and describe these photos in detail.';
+      if (chatMode === 'photo') {
+        userPrompt = 'Enhance this photo realistically with natural lighting and crisp detail';
+      } else {
+        userPrompt = currentAttachments.some((a) => a.type === 'video')
+          ? 'Please analyze this video and explain its key content.'
+          : 'Please examine and describe these photos in detail.';
+      }
     }
 
     const displayContent = currentVoice ? text : userPrompt;
@@ -946,10 +1324,15 @@ export default function App() {
     setInputText('');
     setAttachedFiles([]);
     setRecordedVoice(null);
+    setUploadError(null);
     setPendingMode(chatMode);
     if (chatMode === 'photo') {
-      setPendingPhotoAspect(genSettings.photoAspectRatio);
-      setThinkingLabel('Creating your image');
+      const initialAspect =
+        attachedImagesForPhotoEdit[0]?.aspectRatio ||
+        referencedPreviousPhoto?.aspectRatio ||
+        genSettings.photoAspectRatio;
+      setPendingPhotoAspect(initialAspect);
+      setThinkingLabel(isPhotoEditRequest ? 'Editing your image' : 'Creating your image');
     } else if (chatMode === 'video') {
       setPendingVideoAspect(genSettings.videoAspectRatio);
       setThinkingLabel('Generating video...');
@@ -1025,18 +1408,46 @@ export default function App() {
       return '';
     };
 
-    // Photo Mode: Dark luminous creation card ("Creating your image") -> seamless decoded reveal
+    // Photo Mode: Generate new photo or edit uploaded photo -> seamless decoded reveal
     if (chatMode === 'photo') {
-      setThinkingLabel('Creating your image');
+      setThinkingLabel(isPhotoEditRequest ? 'Editing your image' : 'Creating your image');
       try {
         const resolvedPrompt = await resolveSpokenPromptIfNeeded();
         const cleanPrompt =
-          resolvedPrompt.trim() || 'natural candid street scene in warm afternoon sunlight';
-        const selectedPhotoAspect = genSettings.photoAspectRatio;
+          resolvedPrompt.trim() ||
+          (isPhotoEditRequest
+            ? 'Enhance this photo realistically with natural lighting and crisp detail'
+            : 'natural candid street scene in warm afternoon sunlight');
+        const selectedPhotoAspect =
+          attachedImagesForPhotoEdit[0]?.aspectRatio ||
+          referencedPreviousPhoto?.aspectRatio ||
+          genSettings.photoAspectRatio;
         const selectedPhotoQuality = genSettings.photoQuality;
 
+        const sourceImagePayload =
+          attachedImagesForPhotoEdit.length > 0
+            ? {
+                data: attachedImagesForPhotoEdit[0].base64Data,
+                mimeType: attachedImagesForPhotoEdit[0].mimeType,
+              }
+            : referencedPreviousPhoto
+            ? {
+                data: referencedPreviousPhoto.data,
+                mimeType: referencedPreviousPhoto.mimeType,
+              }
+            : undefined;
+
+        const additionalImagesPayload =
+          attachedImagesForPhotoEdit.length > 1
+            ? attachedImagesForPhotoEdit.slice(1, 4).map((img) => ({
+                data: img.base64Data,
+                mimeType: img.mimeType,
+              }))
+            : undefined;
+
         let generatedUrl: string | null = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        let resolvedAspect: PhotoAspectRatio = selectedPhotoAspect;
+        for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const response = await fetch('/api/generate-image', {
               method: 'POST',
@@ -1045,13 +1456,24 @@ export default function App() {
                 prompt: cleanPrompt,
                 aspectRatio: selectedPhotoAspect,
                 quality: selectedPhotoQuality,
+                ...(sourceImagePayload ? { sourceImage: sourceImagePayload } : {}),
+                ...(additionalImagesPayload ? { additionalImages: additionalImagesPayload } : {}),
               }),
-              signal: AbortSignal.timeout(45000),
+              signal: AbortSignal.timeout(70000),
             });
 
             if (response.ok) {
               const data = await response.json();
               const imageUrl = data?.imageUrl;
+              if (
+                data?.aspectRatio === '1:1' ||
+                data?.aspectRatio === '16:9' ||
+                data?.aspectRatio === '9:16' ||
+                data?.aspectRatio === '4:3' ||
+                data?.aspectRatio === '3:4'
+              ) {
+                resolvedAspect = data.aspectRatio;
+              }
               if (imageUrl && imageUrl.startsWith('data:image/')) {
                 await preloadImage(imageUrl, 5000);
                 generatedUrl = imageUrl;
@@ -1065,10 +1487,10 @@ export default function App() {
               }
             }
           } catch {
-            // Transient fetch hiccup; retry below
+            // Transient fetch hiccup; retry once below
           }
-          if (attempt < 2) {
-            await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+          if (attempt < 1) {
+            await new Promise((r) => setTimeout(r, 900));
           }
         }
 
@@ -1082,7 +1504,7 @@ export default function App() {
               generatedPhoto: {
                 url: generatedUrl,
                 prompt: cleanPrompt,
-                aspectRatio: selectedPhotoAspect,
+                aspectRatio: resolvedAspect,
                 quality: selectedPhotoQuality,
               },
             },
@@ -1096,7 +1518,9 @@ export default function App() {
           ...newHistory,
           {
             role: 'assistant',
-            content: 'Image generation took longer than expected. Please try again in a few moments.',
+            content: isPhotoEditRequest
+              ? 'Photo editing took longer than expected. Please try again in a few moments.'
+              : 'Image generation took longer than expected. Please try again in a few moments.',
           },
         ];
         setMessages(fallbackHistory);
@@ -1106,7 +1530,9 @@ export default function App() {
           ...newHistory,
           {
             role: 'assistant',
-            content: 'Image generation took longer than expected. Please try again in a few moments.',
+            content: isPhotoEditRequest
+              ? 'Photo editing took longer than expected. Please try again in a few moments.'
+              : 'Image generation took longer than expected. Please try again in a few moments.',
           },
         ];
         setMessages(errHistory);
@@ -1218,9 +1644,12 @@ export default function App() {
                 try {
                   await reader.cancel();
                 } catch {}
+                const isQuotaOrBlocked =
+                  /ZeroGPU quota|exceeded your.*quota/i.test(sseText) ||
+                  /event:\s*error\s*\r?\n\s*data:\s*null\b/i.test(sseText);
                 return {
                   url: null,
-                  quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+                  quotaExceeded: isQuotaOrBlocked,
                 };
               }
             }
@@ -1361,8 +1790,9 @@ export default function App() {
           }
         }
 
-        // 4. Server-authenticated Wan + dedicated GPU cluster job failover
-        for (let jobAttempt = 0; jobAttempt < 2 && !finalVideoUrl; jobAttempt++) {
+        // 4. Server-authenticated Wan + dedicated GPU/storyboard video failover
+        let serverJobFinishedWithFailure = false;
+        for (let jobAttempt = 0; jobAttempt < 2 && !finalVideoUrl && !serverJobFinishedWithFailure; jobAttempt++) {
           try {
             const startRes = await fetch('/api/generate-video', {
               method: 'POST',
@@ -1406,6 +1836,7 @@ export default function App() {
                   break;
                 }
                 if (pollData?.status === 'failed') {
+                  serverJobFinishedWithFailure = true;
                   break;
                 }
               } catch {
@@ -1500,55 +1931,23 @@ export default function App() {
         .filter((m, idx, arr) => m.content.length > 0 || idx === arr.length - 1)
         .slice(-8);
 
-      let data: any;
-      try {
-        const response = await fetch('/api/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            messages: messagesPayload,
-            attachments: payloadAttachments,
-          }),
-        });
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: messagesPayload,
+          attachments: payloadAttachments,
+        }),
+        signal: AbortSignal.timeout(45000),
+      });
 
-        if (response.ok) {
-          data = await response.json();
-        } else {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || `Server returned ${response.status}`);
-        }
-      } catch (proxyErr) {
-        // Transparent client-side failover for static / InfinityFree hosting
-        console.warn('Backend proxy unreachable, falling back to direct AI endpoint:', proxyErr);
-        const directRes = await fetch(XKIRO_BASE_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${XKIRO_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model: XKIRO_MODEL,
-            messages: [
-              { role: 'system', content: 'You are BloopX AI. Be concise, direct, helpful, and clear.' },
-              ...messagesPayload,
-            ],
-            max_tokens: 800,
-            temperature: 0.7,
-          }),
-        });
-        if (!directRes.ok) {
-          throw new Error('Unable to get response from AI. Please check your internet connection.');
-        }
-        const directJson: any = await directRes.json();
-        const content = directJson.choices?.[0]?.message?.content || '';
-        data = {
-          content,
-          tokensUsed: directJson.usage?.total_tokens || Math.max(60, Math.ceil(content.length / 4)),
-          provider: XKIRO_MODEL,
-        };
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server returned ${response.status}`);
       }
+      const data: any = await response.json();
       const chatTokens =
         typeof data.tokensUsed === 'number' && data.tokensUsed > 0
           ? data.tokensUsed
@@ -1612,21 +2011,32 @@ export default function App() {
   const getPlaceholderText = () => {
     if (isRecording) return 'Recording voice...';
     if (recordedVoice) return 'Add an optional message or click Run to send voice...';
-    if (chatMode === 'photo') return 'Describe the photo you want to generate...';
+    if (chatMode === 'photo') {
+      return attachedFiles.some((f) => f.type === 'image')
+        ? 'Describe how you want to edit this photo...'
+        : 'Describe the photo you want to generate...';
+    }
     if (chatMode === 'video') return 'Describe the video you want to generate...';
     return 'Ask a question...';
   };
 
   return (
-    <div className="h-screen h-[100dvh] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#0b0c0f] relative">
+    <MotionConfig reducedMotion="user">
+    <div className="h-screen h-[100dvh] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] relative">
       {/* Main Content */}
       <div className="w-full flex-1 flex flex-col justify-between max-w-4xl mx-auto h-full min-h-0 relative">
           
           {/* Top Header */}
-          <header className="w-full flex items-center justify-between px-4 sm:px-6 pt-4 pb-2 z-30 shrink-0">
+          <motion.header
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full flex items-center justify-between px-4 sm:px-6 pt-4 pb-2 z-30 shrink-0"
+          >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
-              <button 
+              <motion.button 
                 id="toggle-sidebar-btn"
+                whileTap={{ scale: 0.92 }}
                 onClick={() => {
                   if (!currentUser) {
                     setShowLoginModal(true);
@@ -1640,7 +2050,7 @@ export default function App() {
                 title={isSidebarOpen ? "Close chat history" : "Open chat history"}
               >
                 <span className="material-symbols-outlined text-[19px]">menu</span>
-              </button>
+              </motion.button>
 
               {/* Mini Chat History Popover */}
               <HistorySidebar
@@ -1656,42 +2066,40 @@ export default function App() {
                 currentUser={currentUser}
               />
 
-              <div
-                className="flex items-center gap-2 cursor-pointer select-none group"
-                onClick={() => handleNewChat()}
-                title="BloopX - New Chat"
-              >
-                <img
-                  src="/logo-icon.svg"
-                  alt="BloopX Logo"
-                  className="w-6 h-6 object-contain shrink-0 group-hover:scale-105 transition-transform"
-                />
-                <span className="font-bold text-[18px] tracking-tight text-white hidden sm:inline whitespace-nowrap shrink-0">
-                  BloopX
-                </span>
-              </div>
-
-              {activeSessionId && (
-                <span className="text-[13px] text-gray-400 truncate max-w-[130px] sm:max-w-[260px] hidden md:inline">
-                  {sessions.find((s) => s.id === activeSessionId)?.title || ''}
-                </span>
-              )}
+              <AnimatePresence mode="wait">
+                {activeSessionId && (
+                  <motion.span
+                    key={activeSessionId}
+                    initial={{ opacity: 0, x: -6 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -6 }}
+                    transition={{ duration: 0.18 }}
+                    className="text-[13px] text-gray-400 truncate max-w-[130px] sm:max-w-[260px] hidden md:inline"
+                  >
+                    {sessions.find((s) => s.id === activeSessionId)?.title || ''}
+                  </motion.span>
+                )}
+              </AnimatePresence>
             </div>
 
           {/* User Profile (when logged in) or Login Action */}
           <div className="relative flex items-center gap-2">
             {!currentUser ? (
-              <button
+              <motion.button
                 id="open-login-btn"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setShowLoginModal(true)}
-                className="h-8 px-3.5 neutral-btn active:scale-95 text-[12px] font-medium rounded-full flex items-center shadow-sm cursor-pointer hover:bg-[#252831] transition"
+                className="h-8 px-3.5 neutral-btn text-[12px] font-medium rounded-full flex items-center shadow-sm cursor-pointer hover:bg-[#3e3e3e] transition"
               >
                 <span>Log in</span>
-              </button>
+              </motion.button>
             ) : (
-              <button
+              <motion.button
                 id="user-profile-btn"
                 type="button"
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.96 }}
                 onClick={() => {
                   setShowUploadMenu(false);
                   setShowModeMenu(false);
@@ -1702,7 +2110,7 @@ export default function App() {
                   }
                   setShowProfileModal(true);
                 }}
-                className="h-8 pl-1 pr-2 rounded-full bg-[#1e2027] hover:bg-[#252731] border border-white/10 hover:border-white/20 flex items-center gap-1.5 shadow-sm cursor-pointer transition select-none"
+                className="h-8 pl-1 pr-2 rounded-full bg-[#323232] hover:bg-[#3e3e3e] border border-white/10 hover:border-white/20 flex items-center gap-1.5 shadow-sm cursor-pointer transition select-none"
                 title={`${currentUser.name} - View profile`}
                 aria-label="View profile"
               >
@@ -1710,37 +2118,72 @@ export default function App() {
                   <img
                     src={currentUser.avatarUrl}
                     alt={currentUser.name}
+                    referrerPolicy="no-referrer"
                     className="w-6 h-6 rounded-full object-cover border border-white/20"
                   />
                 ) : (
-                  <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-[#3b3e4a] to-[#252731] border border-white/20 flex items-center justify-center text-[11px] font-semibold text-white">
+                  <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-[#464646] to-[#323232] border border-white/20 flex items-center justify-center text-[11px] font-semibold text-white">
                     {(currentUser.name || currentUser.email || 'U').trim().charAt(0).toUpperCase()}
                   </div>
                 )}
                 <span className="text-[12px] font-medium text-gray-200 truncate max-w-[80px] sm:max-w-[120px] hidden sm:inline">
                   {currentUser.name}
                 </span>
-              </button>
+              </motion.button>
             )}
           </div>
-        </header>
+        </motion.header>
 
         {/* Chat Canvas */}
         <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col z-10">
           {messages.length === 0 && !isThinking ? (
-            <div className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto" id="empty-state">
-              <h1 className="text-3xl sm:text-5xl md:text-6xl font-semibold text-[#e3e3e3] tracking-tight leading-tight max-w-3xl drop-shadow-sm">
+            <motion.div
+              key={currentScope || 'guest'}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
+              className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto relative"
+              id="empty-state"
+            >
+              <div className="relative mb-5 flex items-center justify-center">
+                <div
+                  className="absolute w-24 h-24 rounded-full bg-gradient-to-tr from-sky-500/20 via-emerald-400/15 to-fuchsia-500/20 blur-xl ambient-aura pointer-events-none"
+                  aria-hidden="true"
+                />
+                <img
+                  src="/logo-icon.svg"
+                  alt="BloopX Emblem"
+                  className="w-12 h-12 sm:w-14 sm:h-14 object-contain relative z-10 ambient-float drop-shadow-lg"
+                />
+              </div>
+              <motion.h1
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.08, duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+                className="text-3xl sm:text-5xl md:text-6xl font-semibold text-[#e3e3e3] tracking-tight leading-tight max-w-3xl drop-shadow-sm"
+              >
                 What would you like to explore today?
-              </h1>
-            </div>
+              </motion.h1>
+            </motion.div>
           ) : (
             <div className="space-y-5 w-full flex-1">
+              <AnimatePresence initial={false}>
               {messages.map((msg, idx) => (
-                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} w-full`}>
+                <motion.div
+                  key={`${activeSessionId || 'active'}-${idx}`}
+                  initial={{
+                    opacity: 0,
+                    y: 12,
+                    scale: msg.role === 'user' ? 0.97 : 0.99,
+                  }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} w-full`}
+                >
                   {msg.role === 'user' ? (
                     <div className="max-w-[85%] sm:max-w-[75%] flex flex-col items-end">
                       <div
-                        className="w-full bg-[#1e2027] text-white px-4 py-2.5 rounded-2xl text-[14.5px] leading-relaxed break-words border border-white/5 space-y-2.5"
+                        className="w-full bg-[#2a2a2a] text-white px-4 py-2.5 rounded-2xl text-[14.5px] leading-relaxed break-words border border-white/[0.08] space-y-2.5 shadow-sm"
                       >
                         {msg.attachments && msg.attachments.length > 0 && (
                           <div className="flex flex-wrap gap-2 pt-0.5 pb-0.5">
@@ -1760,7 +2203,7 @@ export default function App() {
                                       className="w-24 h-24 sm:w-28 sm:h-28 object-cover" 
                                     />
                                   ) : (
-                                    <div className="w-40 h-28 flex flex-col items-center justify-center bg-[#13151b] p-2 text-center">
+                                    <div className="w-40 h-28 flex flex-col items-center justify-center bg-[#202020] p-2 text-center">
                                       <span className="material-symbols-outlined text-3xl text-emerald-400 mb-1">videocam</span>
                                       <span className="text-[11px] text-gray-300 truncate max-w-[130px]">{att.name}</span>
                                     </div>
@@ -1778,8 +2221,11 @@ export default function App() {
                   ) : (
                     <div className="max-w-full w-full ai-output text-[#e3e3e3] px-2 py-1 text-[14.5px]">
                       {msg.generatedVideo ? (
-                        <div
-                          className={`w-full media-reveal ${
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.97 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                          className={`w-full ${
                             msg.generatedVideo.aspectRatio === '9:16'
                               ? 'max-w-[280px]'
                               : msg.generatedVideo.aspectRatio === '1:1'
@@ -1787,7 +2233,7 @@ export default function App() {
                               : 'max-w-xl'
                           }`}
                         >
-                          <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#14151b] shadow-2xl group">
+                          <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#252525] shadow-2xl group">
                             <div
                               className={`relative overflow-hidden bg-black flex items-center justify-center ${
                                 msg.generatedVideo.aspectRatio === '9:16'
@@ -1821,10 +2267,13 @@ export default function App() {
                               </button>
                             </div>
                           </div>
-                        </div>
+                        </motion.div>
                       ) : msg.generatedPhoto ? (
-                        <div
-                          className={`w-full media-reveal ${
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.97 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                          className={`w-full ${
                             msg.generatedPhoto.aspectRatio === '9:16'
                               ? 'max-w-[280px]'
                               : msg.generatedPhoto.aspectRatio === '3:4'
@@ -1834,9 +2283,9 @@ export default function App() {
                               : 'max-w-md'
                           }`}
                         >
-                          <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#14151b] shadow-xl">
+                          <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#252525] shadow-xl">
                             <div
-                              className={`relative overflow-hidden bg-black/40 flex items-center justify-center cursor-pointer group select-none ${
+                              className={`relative overflow-hidden bg-[#1e1e1e] flex items-center justify-center cursor-pointer group select-none ${
                                 msg.generatedPhoto.aspectRatio === '9:16'
                                   ? 'aspect-[9/16]'
                                   : msg.generatedPhoto.aspectRatio === '3:4'
@@ -1854,7 +2303,7 @@ export default function App() {
                               <img
                                 src={msg.generatedPhoto.url}
                                 alt={msg.generatedPhoto.prompt || 'Photo'}
-                                className="w-full h-full object-cover select-none pointer-events-none"
+                                className="w-full h-full object-cover select-none pointer-events-none transition-transform duration-300 group-hover:scale-[1.015]"
                                 loading="eager"
                                 decoding="sync"
                               />
@@ -1877,18 +2326,26 @@ export default function App() {
                               </button>
                             </div>
                           </div>
-                        </div>
+                        </motion.div>
                       ) : (
-                        /* Markdown Text Response for chat */
-                        <div dangerouslySetInnerHTML={{ __html: marked.parse(msg.content) as string }} />
+                        /* Sanitized Markdown Text Response for chat */
+                        <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.content) }} />
                       )}
                     </div>
                   )}
-                </div>
+                </motion.div>
               ))}
+              </AnimatePresence>
 
+              <AnimatePresence>
               {isThinking && (
-                <div className="flex justify-start w-full px-2 py-1">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                  className="flex justify-start w-full px-2 py-1"
+                >
                   {pendingMode === 'photo' ? (
                     <div
                       id="photo-creation-placeholder"
@@ -1913,7 +2370,7 @@ export default function App() {
                           <path d="M18 13.5C18.25 15.6 19.4 16.75 21.5 17C19.4 17.25 18.25 18.4 18 20.5C17.75 18.4 16.6 17.25 14.5 17C16.6 16.75 17.75 15.6 18 13.5Z" />
                         </svg>
                         <span className="thinking-shimmer text-[14.5px] font-normal tracking-tight">
-                          Creating your image
+                          {thinkingLabel || 'Creating your image'}
                         </span>
                       </div>
 
@@ -2007,15 +2464,18 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="material-symbols-outlined text-[18px] text-[#118ab2] animate-spin">
-                        progress_activity
-                      </span>
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1" aria-hidden="true">
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400 thinking-dot [animation-delay:0ms]" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 thinking-dot [animation-delay:150ms]" />
+                        <span className="w-1.5 h-1.5 rounded-full bg-purple-400 thinking-dot [animation-delay:300ms]" />
+                      </div>
                       <span className="thinking-shimmer text-[14px] font-medium">{thinkingLabel}</span>
                     </div>
                   )}
-                </div>
+                </motion.div>
               )}
+              </AnimatePresence>
             </div>
           )}
         </div>
@@ -2037,7 +2497,7 @@ export default function App() {
           type="file" 
           id="doc-file-input" 
           ref={docFileInputRef}
-          accept="image/*,video/*,application/pdf" 
+          accept="image/*,video/*" 
           multiple 
           className="hidden" 
           onChange={(e) => {
@@ -2048,6 +2508,22 @@ export default function App() {
 
         {/* Prompt Input Container */}
         <div className="p-3 sm:p-5 z-20 w-full relative shrink-0">
+
+          {/* Upload Validation Alert */}
+          {uploadError && (
+            <div className="mb-2.5 px-3 py-2 bg-red-500/10 border border-red-500/30 text-red-200 text-[12px] rounded-xl flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[16px] text-red-400">error</span>
+                <span>{uploadError}</span>
+              </div>
+              <button 
+                onClick={() => setUploadError(null)}
+                className="text-red-300 hover:text-white text-[11px] underline cursor-pointer shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {/* Microphone Permission Alert */}
           {micError && (
@@ -2066,10 +2542,15 @@ export default function App() {
           )}
           
           {/* Upload Menu */}
+          <AnimatePresence>
           {showUploadMenu && (
-            <div 
+            <motion.div 
               id="upload-menu" 
-              className="absolute left-4 sm:left-6 bottom-20 sm:bottom-24 bg-[#181a20] rounded-2xl p-1.5 shadow-2xl z-30 w-52 border border-white/5"
+              initial={{ opacity: 0, y: 8, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 6, scale: 0.97 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+              className="absolute left-4 sm:left-6 bottom-20 sm:bottom-24 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-52 border border-white/10 origin-bottom-left"
             >
               <button 
                 id="upload-media-btn" 
@@ -2079,7 +2560,7 @@ export default function App() {
                 }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[#e3e3e3] hover:bg-white/5 rounded-xl transition text-left cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[18px] text-[#9aa0a6]">perm_media</span>
+                <span className="material-symbols-outlined text-[18px] text-[#9e9e9e]">perm_media</span>
                 <span>Photos & Videos</span>
               </button>
               <button 
@@ -2090,17 +2571,23 @@ export default function App() {
                 }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-[#e3e3e3] hover:bg-white/5 rounded-xl transition text-left cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[18px] text-[#9aa0a6]">upload_file</span>
+                <span className="material-symbols-outlined text-[18px] text-[#9e9e9e]">upload_file</span>
                 <span>Upload files</span>
               </button>
-            </div>
+            </motion.div>
           )}
+          </AnimatePresence>
 
-          {/* Mode Selector Menu (Only 2 Options: Chat, Photo) */}
+          {/* Mode Selector Menu (3 Options: Chat, Photo, Video) */}
+          <AnimatePresence>
           {showModeMenu && (
-            <div 
+            <motion.div 
               id="mode-menu" 
-              className="absolute left-14 sm:left-16 bottom-20 sm:bottom-24 bg-[#181a20] rounded-2xl p-1.5 shadow-2xl z-30 w-48 border border-white/10 animate-fade-in"
+              initial={{ opacity: 0, y: 8, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 6, scale: 0.97 }}
+              transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
+              className="absolute left-14 sm:left-16 bottom-20 sm:bottom-24 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-48 border border-white/10 origin-bottom-left"
             >
               {/* Option 1: Chat mode */}
               <button 
@@ -2109,14 +2596,14 @@ export default function App() {
                   setShowModeMenu(false);
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2 text-[12.5px] rounded-xl transition text-left cursor-pointer ${
-                  chatMode === 'chat' ? 'bg-white/10 text-white font-medium' : 'text-[#d1d5db] hover:bg-white/5'
+                  chatMode === 'chat' ? 'bg-white/10 text-white font-medium' : 'text-[#d4d4d4] hover:bg-white/5'
                 }`}
               >
                 <div className="flex items-center gap-2.5">
                   <span className="material-symbols-outlined text-[18px] text-blue-400">chat_bubble</span>
                   <div>
                     <p className="leading-tight">Chat</p>
-                    <p className="text-[10.5px] text-[#8e918f]">Chat with AI</p>
+                    <p className="text-[10.5px] text-[#8e8e8e]">Chat with AI</p>
                   </div>
                 </div>
                 {chatMode === 'chat' && (
@@ -2134,17 +2621,17 @@ export default function App() {
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2 text-[12.5px] rounded-xl transition text-left ${
                   isTokenLimitReached
-                    ? 'opacity-45 cursor-not-allowed text-[#9aa0a6]'
+                    ? 'opacity-45 cursor-not-allowed text-[#9e9e9e]'
                     : chatMode === 'photo'
                     ? 'bg-white/10 text-white font-medium cursor-pointer'
-                    : 'text-[#d1d5db] hover:bg-white/5 cursor-pointer'
+                    : 'text-[#d4d4d4] hover:bg-white/5 cursor-pointer'
                 }`}
               >
                 <div className="flex items-center gap-2.5">
                   <span className="material-symbols-outlined text-[18px] text-emerald-400">image</span>
                   <div>
                     <p className="leading-tight">Photo</p>
-                    <p className="text-[10.5px] text-[#8e918f]">
+                    <p className="text-[10.5px] text-[#8e8e8e]">
                       {isTokenLimitReached ? '100k limit reached' : 'Generate photos'}
                     </p>
                   </div>
@@ -2164,17 +2651,17 @@ export default function App() {
                 }}
                 className={`w-full flex items-center justify-between px-3 py-2 text-[12.5px] rounded-xl transition text-left ${
                   isTokenLimitReached
-                    ? 'opacity-45 cursor-not-allowed text-[#9aa0a6]'
+                    ? 'opacity-45 cursor-not-allowed text-[#9e9e9e]'
                     : chatMode === 'video'
                     ? 'bg-white/10 text-white font-medium cursor-pointer'
-                    : 'text-[#d1d5db] hover:bg-white/5 cursor-pointer'
+                    : 'text-[#d4d4d4] hover:bg-white/5 cursor-pointer'
                 }`}
               >
                 <div className="flex items-center gap-2.5">
                   <span className="material-symbols-outlined text-[18px] text-purple-400">videocam</span>
                   <div>
                     <p className="leading-tight">Video</p>
-                    <p className="text-[10.5px] text-[#8e918f]">
+                    <p className="text-[10.5px] text-[#8e8e8e]">
                       {isTokenLimitReached ? '100k limit reached' : 'Generate video'}
                     </p>
                   </div>
@@ -2183,18 +2670,22 @@ export default function App() {
                   <span className="material-symbols-outlined text-[16px] text-purple-400">check</span>
                 )}
               </button>
-            </div>
+            </motion.div>
           )}
-
-
+          </AnimatePresence>
 
           {/* Rotating 5-Color Glowing Border */}
-          <div className="rotating-border-wrapper shadow-2xl">
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+            className="rotating-border-wrapper shadow-2xl"
+          >
             <div className="rotating-conic-glow"></div>
             <div className="rotating-conic-sharp"></div>
 
             <div 
-              className="relative bg-[#131419] rounded-[24px] p-3 sm:p-4 z-20 w-full cursor-text"
+              className="relative bg-[#252525] rounded-[24px] p-3 sm:p-4 z-20 w-full cursor-text"
               onClick={(e) => {
                 const target = e.target as HTMLElement;
                 if (!target.closest('button') && !target.closest('#upload-menu') && !target.closest('#mode-menu')) {
@@ -2203,10 +2694,15 @@ export default function App() {
               }}
             >
               
-              {/* Live Voice Recording Animation Bar (Max 5:00 — No Cancel / Extra Stop Buttons) */}
+              {/* Live Voice Recording Animation Bar (Max 5:00) */}
+              <AnimatePresence>
               {isRecording && (
-                <div
+                <motion.div
                   id="voice-recording-bar"
+                  initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                  transition={{ duration: 0.18 }}
                   className="mb-3 flex items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-2xl bg-red-500/10 border border-red-500/25 select-none"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
@@ -2239,28 +2735,43 @@ export default function App() {
                   >
                     {formatTime(recordingSeconds)}
                   </span>
-                </div>
+                </motion.div>
               )}
+              </AnimatePresence>
 
               {/* Ready-to-Send Recorded Voice Preview */}
+              <AnimatePresence>
               {!isRecording && recordedVoice && (
-                <div id="recorded-voice-preview" className="mb-3 flex items-center">
+                <motion.div
+                  id="recorded-voice-preview"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.18 }}
+                  className="mb-3 flex items-center"
+                >
                   <VoiceAudioPlayer
                     src={recordedVoice.blobUrl}
                     durationSeconds={recordedVoice.durationSeconds}
                     onRemove={discardRecordedVoice}
                     compact
                   />
-                </div>
+                </motion.div>
               )}
+              </AnimatePresence>
 
               {/* Media File Previews */}
               {attachedFiles.length > 0 && (
                 <div id="file-previews" className="flex flex-wrap items-center gap-2 mb-3 max-h-40 overflow-y-auto pt-1 pb-1">
+                  <AnimatePresence initial={false}>
                   {attachedFiles.map((item) => (
-                    <div 
+                    <motion.div 
                       key={item.id} 
-                      className="group relative flex items-center gap-2 bg-[#1b1d24] border border-white/10 pl-1.5 pr-2.5 py-1.5 rounded-xl text-[12px] text-white shadow-sm"
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.88 }}
+                      transition={{ duration: 0.16 }}
+                      className="group relative flex items-center gap-2 bg-[#323232] border border-white/10 pl-1.5 pr-2.5 py-1.5 rounded-xl text-[12px] text-white shadow-sm"
                     >
                       {item.type === 'image' ? (
                         <img 
@@ -2284,8 +2795,9 @@ export default function App() {
                       >
                         <span className="material-symbols-outlined text-[14px]">close</span>
                       </button>
-                    </div>
+                    </motion.div>
                   ))}
+                  </AnimatePresence>
                 </div>
               )}
 
@@ -2311,15 +2823,16 @@ export default function App() {
                   }
                 }}
                 placeholder={currentUser ? getPlaceholderText() : 'Please sign in to chat, generate photos, or make videos...'}
-                className="w-full bg-transparent text-white placeholder-[#8e918f] text-[15px] sm:text-[16px] outline-none mb-3 resize-none max-h-32 min-h-[36px] caret-white relative z-30"
+                className="w-full bg-transparent text-white placeholder-[#7e7e7e] text-[15px] sm:text-[16px] outline-none mb-3 resize-none max-h-32 min-h-[36px] caret-white relative z-30"
               ></textarea>
 
               <div className="flex items-center justify-between pt-1">
                 <div className="flex items-center gap-2">
                   {/* Add File Button */}
-                  <button 
+                  <motion.button 
                     id="add-file-btn" 
                     type="button" 
+                    whileTap={{ scale: 0.9 }}
                     title="Add files" 
                     onClick={() => {
                       if (!currentUser) {
@@ -2332,12 +2845,13 @@ export default function App() {
                     className="w-8 h-8 rounded-full flex items-center justify-center neutral-btn shadow-sm cursor-pointer hover:bg-white/10 transition relative"
                   >
                     <span className="material-symbols-outlined text-[18px]">add</span>
-                  </button>
+                  </motion.button>
 
                   {/* Mode Selector Button (3 Options: Chat, Photo, Video) */}
-                  <button
+                  <motion.button
                     id="mode-selector-btn"
                     type="button"
+                    whileTap={{ scale: 0.94 }}
                     onClick={() => {
                       if (!currentUser) {
                         setShowLoginModal(true);
@@ -2349,33 +2863,45 @@ export default function App() {
                     className="h-8 px-2.5 rounded-full neutral-btn shadow-sm cursor-pointer hover:bg-white/10 transition flex items-center gap-1.5 text-[12px] font-medium text-[#d1d5db]"
                     title="Change Mode"
                   >
-                    {chatMode === 'chat' && (
-                      <>
-                        <span className="material-symbols-outlined text-[16px] text-blue-400">chat_bubble</span>
-                        <span>Chat</span>
-                      </>
-                    )}
-                    {chatMode === 'photo' && (
-                      <>
-                        <span className="material-symbols-outlined text-[16px] text-emerald-400">image</span>
-                        <span className="text-emerald-300">Photo</span>
-                      </>
-                    )}
-                    {chatMode === 'video' && (
-                      <>
-                        <span className="material-symbols-outlined text-[16px] text-purple-400">videocam</span>
-                        <span className="text-purple-300">Video</span>
-                      </>
-                    )}
+                    <AnimatePresence mode="wait" initial={false}>
+                      <motion.span
+                        key={chatMode}
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.14 }}
+                        className="flex items-center gap-1.5"
+                      >
+                        {chatMode === 'chat' && (
+                          <>
+                            <span className="material-symbols-outlined text-[16px] text-blue-400">chat_bubble</span>
+                            <span>Chat</span>
+                          </>
+                        )}
+                        {chatMode === 'photo' && (
+                          <>
+                            <span className="material-symbols-outlined text-[16px] text-emerald-400">image</span>
+                            <span className="text-emerald-300">Photo</span>
+                          </>
+                        )}
+                        {chatMode === 'video' && (
+                          <>
+                            <span className="material-symbols-outlined text-[16px] text-purple-400">videocam</span>
+                            <span className="text-purple-300">Video</span>
+                          </>
+                        )}
+                      </motion.span>
+                    </AnimatePresence>
                     <span className="material-symbols-outlined text-[14px] text-gray-400">expand_more</span>
-                  </button>
+                  </motion.button>
                 </div>
 
                 <div className="flex items-center gap-2">
                   {/* Mic / Red Stop Button */}
-                  <button 
+                  <motion.button 
                     id="mic-btn" 
                     type="button" 
+                    whileTap={{ scale: 0.9 }}
                     title={isRecording ? "Stop recording" : "Record voice"}
                     onClick={toggleMic}
                     className={`w-8 h-8 rounded-full flex items-center justify-center shadow-sm relative cursor-pointer transition ${
@@ -2387,25 +2913,26 @@ export default function App() {
                     <span id="mic-icon" className="material-symbols-outlined text-[18px]">
                       {isRecording ? 'stop' : 'mic'}
                     </span>
-                  </button>
+                  </motion.button>
                   
                   {/* Send Button: ALWAYS shows "Run" per user instruction */}
-                  <button 
+                  <motion.button 
                     id="run-btn" 
+                    whileTap={hasContent && !isThinking ? { scale: 0.94 } : undefined}
                     disabled={!hasContent || isThinking}
                     onClick={handleSend}
                     className={
                       hasContent && !isThinking
-                        ? "px-4 py-1.5 bg-white text-black text-[13px] font-semibold rounded-xl cursor-pointer hover:bg-gray-200 transition-all duration-150 flex items-center gap-1"
-                        : "px-4 py-1.5 bg-[#1b1c22] text-[#5f6368] text-[13px] font-semibold rounded-xl cursor-not-allowed transition-all duration-150"
+                        ? "px-4 py-1.5 bg-white text-black text-[13px] font-semibold rounded-xl cursor-pointer hover:bg-gray-200 transition-all duration-150 flex items-center gap-1 shadow-sm"
+                        : "px-4 py-1.5 bg-[#1f1f1f] border border-white/10 text-[#6e6e6e] text-[13px] font-semibold rounded-xl cursor-not-allowed transition-all duration-150"
                     }
                   >
                     <span>Run</span>
-                  </button>
+                  </motion.button>
                 </div>
               </div>
             </div>
-          </div>
+          </motion.div>
         </div>
 
         {/* Auth Modal: Google Sign-in (only shown when not already logged in) */}
@@ -2420,7 +2947,7 @@ export default function App() {
           />
         )}
 
-        {/* Profile Modal: Small panel matching reference photo with Usage & Settings */}
+        {/* Profile Modal: Small panel with Usage & Settings */}
         {currentUser && (
           <ProfileModal
             isOpen={showProfileModal}
@@ -2439,5 +2966,6 @@ export default function App() {
 
       </div>
     </div>
+    </MotionConfig>
   );
 }

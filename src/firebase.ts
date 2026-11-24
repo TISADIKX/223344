@@ -13,13 +13,12 @@ import {
 import {
   getFirestore,
   doc,
-  getDocFromServer,
   collection,
   setDoc,
   deleteDoc,
   onSnapshot,
   query,
-  orderBy,
+  where,
   Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -33,18 +32,6 @@ export const auth = getAuth(app);
 
 // Firestore database instance using the specific database ID
 export const db: Firestore = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
-
-// Test Firestore connectivity on boot
-export async function testFirestoreConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn("Please check your Firebase configuration or internet connection.");
-    }
-  }
-}
-testFirestoreConnection().catch(() => {});
 
 // Google Auth Provider configured for popups
 export const googleProvider = new GoogleAuthProvider();
@@ -96,8 +83,7 @@ export const logOutFromFirebase = async (): Promise<void> => {
 
 // ----------------- FIRESTORE CHAT HISTORY SYNC -----------------
 
-// Error handling helper per Firebase skill
-enum OperationType {
+export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
   DELETE = 'delete',
@@ -106,40 +92,96 @@ enum OperationType {
   WRITE = 'write',
 }
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo = {
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
       emailVerified: auth.currentUser?.emailVerified,
       isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo:
+        auth.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
     },
     operationType,
     path,
   };
-  console.error('Firestore Error:', JSON.stringify(errInfo));
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+const VALID_ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
+
+function serializeMessagesForFirestore(messages: Message[]): string {
+  const raw = JSON.stringify(messages || []);
+  if (raw.length <= 890000) return raw;
+
+  // Strip oversized inline data URI attachments so session document stays safely within blueprint limit
+  const trimmedMessages = (messages || []).map((m) => ({
+    ...m,
+    attachments: m.attachments?.map((att) =>
+      att.previewUrl && att.previewUrl.length > 50000
+        ? { ...att, previewUrl: '' }
+        : att
+    ),
+    generatedPhoto:
+      m.generatedPhoto && m.generatedPhoto.url.length > 200000
+        ? { ...m.generatedPhoto, url: '' }
+        : m.generatedPhoto,
+  }));
+  const compact = JSON.stringify(trimmedMessages);
+  if (compact.length <= 890000) return compact;
+
+  return JSON.stringify(trimmedMessages.slice(-20)).slice(0, 890000);
 }
 
 /**
- * Save or update a chat session in permanent Firestore database
+ * Save or update a chat session in permanent Firestore database (strictly scoped to userId)
  */
 export async function saveSessionToFirestore(
   userId: string,
   session: ChatSession
 ): Promise<void> {
   if (!userId || !session || !session.id) return;
+  if (!auth.currentUser || auth.currentUser.uid !== userId) return;
+  if (!VALID_ID_REGEX.test(userId) || !VALID_ID_REGEX.test(session.id)) return;
+
   const path = `users/${userId}/sessions/${session.id}`;
   try {
     const sessionDocRef = doc(db, 'users', userId, 'sessions', session.id);
+    const safeTitle = (session.title || 'New chat').trim().slice(0, 100) || 'New chat';
+    const safeMode: ChatMode =
+      session.chatMode === 'photo' || session.chatMode === 'video' ? session.chatMode : 'chat';
+
     const dataToStore = {
-      id: session.id,
-      userId,
-      title: session.title.slice(0, 100),
-      chatMode: session.chatMode || 'chat',
-      messages: JSON.stringify(session.messages || []),
-      createdAt: session.createdAt || Date.now(),
-      updatedAt: session.updatedAt || Date.now(),
+      id: session.id.slice(0, 128),
+      userId: userId.slice(0, 128),
+      title: safeTitle,
+      chatMode: safeMode,
+      messages: serializeMessagesForFirestore(session.messages || []),
+      createdAt: Number(session.createdAt) || Date.now(),
+      updatedAt: Number(session.updatedAt) || Date.now(),
     };
     await setDoc(sessionDocRef, dataToStore, { merge: true });
   } catch (err) {
@@ -148,13 +190,16 @@ export async function saveSessionToFirestore(
 }
 
 /**
- * Delete a session permanently from Firestore database
+ * Delete a session permanently from Firestore database (strictly scoped to userId)
  */
 export async function deleteSessionFromFirestore(
   userId: string,
   sessionId: string
 ): Promise<void> {
   if (!userId || !sessionId) return;
+  if (!auth.currentUser || auth.currentUser.uid !== userId) return;
+  if (!VALID_ID_REGEX.test(userId) || !VALID_ID_REGEX.test(sessionId)) return;
+
   const path = `users/${userId}/sessions/${sessionId}`;
   try {
     const sessionDocRef = doc(db, 'users', userId, 'sessions', sessionId);
@@ -165,17 +210,20 @@ export async function deleteSessionFromFirestore(
 }
 
 /**
- * Subscribe to real-time updates of user chat sessions from Firestore
+ * Subscribe to real-time updates of a specific user's private chat sessions from Firestore
  */
 export function subscribeToUserSessions(
   userId: string,
-  onSessionsUpdate: (sessions: ChatSession[]) => void
+  onSessionsUpdate: (sessions: ChatSession[]) => void,
+  onError?: (err: unknown) => void
 ): () => void {
-  if (!userId) return () => {};
+  if (!userId || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return () => {};
+  }
   const path = `users/${userId}/sessions`;
   try {
     const sessionsCollRef = collection(db, 'users', userId, 'sessions');
-    const q = query(sessionsCollRef, orderBy('updatedAt', 'desc'));
+    const q = query(sessionsCollRef, where('userId', '==', userId));
 
     const unsubscribe = onSnapshot(
       q,
@@ -183,6 +231,8 @@ export function subscribeToUserSessions(
         const loaded: ChatSession[] = [];
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
+          if (d.userId && d.userId !== userId) return;
+
           let parsedMessages: Message[] = [];
           if (typeof d.messages === 'string') {
             try {
@@ -194,23 +244,32 @@ export function subscribeToUserSessions(
 
           loaded.push({
             id: d.id || docSnap.id,
+            userId,
             title: d.title || 'Chat',
             chatMode: (d.chatMode as ChatMode) || 'chat',
             messages: parsedMessages,
-            createdAt: d.createdAt || Date.now(),
-            updatedAt: d.updatedAt || Date.now(),
+            createdAt: Number(d.createdAt) || Date.now(),
+            updatedAt: Number(d.updatedAt) || Date.now(),
           });
         });
+
+        loaded.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
         onSessionsUpdate(loaded);
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, path);
+        console.warn('Firestore session listener error:', path, error);
+        if (onError) {
+          onError(error);
+        }
       }
     );
 
     return unsubscribe;
   } catch (err) {
-    handleFirestoreError(err, OperationType.LIST, path);
+    console.warn('Firestore session subscription setup error:', path, err);
+    if (onError) {
+      onError(err);
+    }
     return () => {};
   }
 }

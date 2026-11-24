@@ -8,6 +8,7 @@ export interface AttachedMedia {
   type: 'image' | 'video';
   previewUrl: string;
   base64Data: string;
+  aspectRatio?: PhotoAspectRatio;
 }
 
 export interface RecordedVoice {
@@ -86,6 +87,7 @@ export interface UserTokenAllowance {
 
 export interface ChatSession {
   id: string;
+  userId?: string;
   title: string;
   messages: Message[];
   createdAt: number;

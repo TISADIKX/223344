@@ -25,15 +25,15 @@ if (!isset($input['messages']) || !is_array($input['messages'])) {
     exit;
 }
 
-$apiKey = getenv("XKIRO_CHAT_API_KEY") ?: "sk-xt-00f5e006f6e7a60050887fbcf1be7b600c79d8daf3ff86fd";
-$baseUrl = "https://api.xkiro.com/v1/chat/completions";
+$clientToken = isset($_SERVER['HTTP_X_HF_TOKEN']) ? trim($_SERVER['HTTP_X_HF_TOKEN']) : '';
+$apiKey = $clientToken ?: (getenv("HF_ACCESS_TOKEN") ?: (getenv("HF_TOKEN") ?: ""));
+$baseUrl = "https://router.huggingface.co/v1/chat/completions";
 
 $models = [
-    "mistralai/ministral-8b",
-    "cohere/command-r7b-12-2024",
-    "mistralai/ministral-14b",
-    "sensenova/sensenova-6.8-flash-lite",
-    "cohere/command-r-08-2024"
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "deepseek-ai/DeepSeek-R1",
+    "mistralai/Mistral-7B-Instruct-v0.3"
 ];
 
 $normalizedMessages = [];
@@ -70,10 +70,11 @@ foreach ($models as $model) {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Content-Type: application/json",
-        "Authorization: Bearer " . $apiKey
-    ]);
+    $headers = ["Content-Type: application/json"];
+    if (!empty($apiKey)) {
+        $headers[] = "Authorization: Bearer " . $apiKey;
+    }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_TIMEOUT, 20);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
 
@@ -99,5 +100,8 @@ foreach ($models as $model) {
     }
 }
 
-http_response_code(500);
-echo json_encode(["error" => "AI response failed: " . ($lastError ?: "Unable to reach AI services")]);
+http_response_code(502);
+echo json_encode([
+    "error" => "AI chat service unavailable: " . ($lastError ?: "Unable to reach Hugging Face router") .
+               (empty($apiKey) ? " (Tip: add your free Hugging Face token in Settings)." : "")
+]);
