@@ -39,6 +39,12 @@ export const HF_CHAT_MODELS = [
   'deepseek-ai/DeepSeek-R1',
   'meta-llama/Llama-3.1-8B-Instruct',
 ];
+export const HF_VISION_MODELS = [
+  'Qwen/Qwen3.8-Flash-Next',
+  'google/gemma-4-26B-A4B-it',
+  'Qwen/Qwen3.8-27B',
+  'google/gemma-3-4b-it',
+];
 export const HF_DEFAULT_CHAT_MODEL = HF_CHAT_MODELS[0];
 
 // Store expiration timestamp (blockedUntil ms) per model so 503/429 short-circuit cleanly
@@ -82,14 +88,18 @@ export function extractTextFromChoiceContent(rawContent: any): string {
 
 export async function transcribeAudioWithGemini(
   audioData: string,
-  mimeType?: string
+  mimeType?: string,
+  clientHfToken?: string,
+  transcriptHint?: string
 ): Promise<string> {
-  const geminiApiKey = getGeminiApiKey();
-  if (!geminiApiKey || !audioData) {
-    return '';
+  const cleanData = audioData.includes(',') ? audioData.split(',')[1] : audioData;
+  const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+  if (!cleanData) {
+    return (transcriptHint || '').trim();
   }
 
-  try {
+  const geminiApiKey = getGeminiApiKey();
+  if (geminiApiKey) {
     const ai = new GoogleGenAI({
       apiKey: geminiApiKey,
       httpOptions: {
@@ -99,29 +109,66 @@ export async function transcribeAudioWithGemini(
       },
     });
 
-    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
-    const cleanData = audioData.includes(',') ? audioData.split(',')[1] : audioData;
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: cleanMime,
-              data: cleanData,
-            },
+    for (const model of ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-2.5-flash']) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: cleanMime,
+                  data: cleanData,
+                },
+              },
+              {
+                text: 'Transcribe the spoken words in this audio accurately into plain text without quotes or commentary. If there is no intelligible speech, output ONLY [NO_SPEECH].',
+              },
+            ],
           },
-          {
-            text: 'Transcribe this audio speech accurately into plain text without any conversational preamble or markdown quotes.',
-          },
-        ],
-      },
-    });
+        });
 
-    return response.text?.trim() || '';
-  } catch {
-    return '';
+        const raw = response.text?.trim() || '';
+        const cleaned = raw.replace(/^["'`]+|["'`]+$/g, '').trim();
+        if (cleaned && !/^\[?no[_\s-]*speech\]?$|^empty$/i.test(cleaned)) {
+          return cleaned;
+        }
+      } catch {
+        // Try next Gemini model
+      }
+    }
   }
+
+  const hfToken = clientHfToken || getHfAccessToken();
+  if (hfToken) {
+    try {
+      const audioBuffer = Buffer.from(cleanData, 'base64');
+      if (audioBuffer.length > 64) {
+        const client = new InferenceClient(hfToken);
+        const audioBlob = new Blob([audioBuffer], { type: cleanMime });
+        for (const asrModel of ['openai/whisper-large-v3-turbo', 'openai/whisper-large-v3']) {
+          try {
+            const asrRes = await client.automaticSpeechRecognition(
+              {
+                model: asrModel,
+                data: audioBlob,
+                provider: 'hf-inference',
+              } as any,
+              { signal: AbortSignal.timeout(14000) }
+            );
+            const text = typeof asrRes?.text === 'string' ? asrRes.text.trim() : '';
+            if (text) return text;
+          } catch {
+            // Try next ASR model
+          }
+        }
+      }
+    } catch {
+      // Fall through to browser speech transcript hint
+    }
+  }
+
+  return (transcriptHint || '').trim();
 }
 
 export async function callXkiroChat(
@@ -182,12 +229,14 @@ export async function callXkiroChat(
 
 export async function callHuggingFaceChat(
   payloadMessages: any[],
-  clientToken?: string
+  clientToken?: string,
+  hasImages: boolean = false
 ): Promise<{ content: string; tokensUsed: number; modelUsed: string } | null> {
   const token = clientToken || getHfAccessToken();
   if (!token) return null;
 
-  for (const model of HF_CHAT_MODELS) {
+  const modelsToTry = hasImages ? HF_VISION_MODELS : HF_CHAT_MODELS;
+  for (const model of modelsToTry) {
     try {
       const res = await fetch(HF_CHAT_ROUTER_URL, {
         method: 'POST',
@@ -239,53 +288,71 @@ export async function callGeminiFallbackChat(
   const geminiApiKey = getGeminiApiKey();
   if (!geminiApiKey) return null;
 
-  try {
-    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-    const parts: any[] = [];
-    const transcriptLines = recentMessages.map(
-      (m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`
-    );
-    parts.push({
-      text: `You are BloopX AI. Be concise, direct, helpful, and clear.\n\n${transcriptLines.join('\n')}\nAssistant:`,
-    });
-    for (const att of attachments) {
-      if (att?.data && typeof att?.mimeType === 'string' && att.mimeType.startsWith('image/')) {
-        parts.push({ inlineData: { mimeType: att.mimeType, data: String(att.data) } });
+  const ai = new GoogleGenAI({
+    apiKey: geminiApiKey,
+    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+  });
+
+  const parts: any[] = [];
+  const transcriptLines = recentMessages.map(
+    (m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`
+  );
+  parts.push({
+    text: `You are BloopX AI. Be concise, direct, helpful, and clear. Analyze any attached image, video, or audio directly.\n\n${transcriptLines.join('\n')}\nAssistant:`,
+  });
+
+  for (const att of attachments) {
+    if (!att?.data || typeof att?.mimeType !== 'string') continue;
+    const cleanMime = att.mimeType.split(';')[0].trim();
+    const cleanData = String(att.data).includes(',') ? String(att.data).split(',')[1] : String(att.data);
+    if (!cleanData) continue;
+    if (
+      cleanMime.startsWith('image/') ||
+      cleanMime.startsWith('video/') ||
+      cleanMime.startsWith('audio/')
+    ) {
+      parts.push({ inlineData: { mimeType: cleanMime, data: cleanData } });
+    }
+  }
+
+  for (const model of ['gemini-4-hydrogen', 'gemini-2.5-flash']) {
+    try {
+      const resp = await ai.models.generateContent({
+        model,
+        contents: { parts },
+      });
+      const text = resp.text?.trim() || '';
+      if (text) {
+        return {
+          content: text,
+          tokensUsed: Math.max(60, Math.ceil((JSON.stringify(recentMessages).length + text.length) / 4)),
+          modelUsed: model,
+        };
       }
+    } catch {
+      // Try next Gemini model
     }
-    const resp = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts },
-    });
-    const text = resp.text?.trim() || '';
-    if (text) {
-      return {
-        content: text,
-        tokensUsed: Math.max(60, Math.ceil((JSON.stringify(recentMessages).length + text.length) / 4)),
-        modelUsed: 'gemini-2.5-flash',
-      };
-    }
-  } catch {
-    // Fail over to zero-key fallback
   }
   return null;
 }
 
 export async function callZeroKeyFallbackChat(
-  plainMessages: Array<{ role: string; content: string }>
+  plainMessages: Array<{ role: string; content: string }>,
+  openAiMessages?: any[],
+  hasVisualMedia: boolean = false
 ): Promise<{ content: string; tokensUsed: number; modelUsed: string } | null> {
-  // 1. Pollinations OpenAI-compatible text endpoint
+  // 1. Pollinations OpenAI-compatible text/vision endpoint
   try {
     const res = await fetch('https://text.pollinations.ai/openai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'openai',
-        messages: plainMessages,
+        messages: hasVisualMedia && openAiMessages ? openAiMessages : plainMessages,
         max_tokens: 750,
         temperature: 0.7,
       }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(12000),
     });
     if (res.ok) {
       const data: any = await res.json();
@@ -303,7 +370,11 @@ export async function callZeroKeyFallbackChat(
       }
     }
   } catch {
-    // Fall through to AI Horde
+    // Fall through to AI Horde (text-only only when no visual attachment is present)
+  }
+
+  if (hasVisualMedia) {
+    return null;
   }
 
   // 2. AI Horde distributed text generation fallback
@@ -381,18 +452,24 @@ export async function handleChatRequest(params: {
             typeof att.mimeType === 'string' &&
             att.data.length < 30_000_000
         )
-        .slice(0, 12)
+        .slice(0, 16)
     : [];
 
-  const hasMedia = safeAttachments.length > 0;
-  const hasImages = safeAttachments.some((att: any) => att.mimeType.startsWith('image/'));
-  let voiceTranscript = '';
+  const audioAtt = safeAttachments.find((att: any) => att.mimeType.startsWith('audio/'));
+  const imageLikeAttachments = safeAttachments.filter((att: any) => att.mimeType.startsWith('image/'));
+  const rawVideoAttachments = safeAttachments.filter((att: any) => att.mimeType.startsWith('video/'));
+  const hasImageParts = imageLikeAttachments.length > 0;
+  const hasRawVideoOnly = rawVideoAttachments.length > 0 && !hasImageParts;
+  const hasVisualMedia = hasImageParts || rawVideoAttachments.length > 0;
 
-  if (hasMedia) {
-    const audioAtt = safeAttachments.find((att: any) => att.mimeType.startsWith('audio/'));
-    if (audioAtt) {
-      voiceTranscript = await transcribeAudioWithGemini(audioAtt.data, audioAtt.mimeType);
-    }
+  let voiceTranscript = '';
+  if (audioAtt) {
+    voiceTranscript = await transcribeAudioWithGemini(
+      audioAtt.data,
+      audioAtt.mimeType,
+      clientHfToken,
+      typeof audioAtt.transcriptHint === 'string' ? audioAtt.transcriptHint : undefined
+    );
   }
 
   const normalizedMessages = messages
@@ -416,31 +493,38 @@ export async function handleChatRequest(params: {
             role: 'user',
             content:
               voiceTranscript ||
-              'The user sent a voice audio clip. Politely let them know if audio transcription is unavailable and invite them to type or try again.',
+              (hasVisualMedia
+                ? 'Please inspect and explain the uploaded photo or video in detail.'
+                : 'The user sent a voice audio clip. Listen carefully and respond directly to what they said.'),
           },
         ];
 
   const systemPrompt = {
     role: 'system',
     content:
-      'You are BloopX AI. Be concise, direct, helpful, and clear. Avoid verbose pleasantries or excessive repetition.',
+      'You are BloopX AI. Be concise, direct, helpful, and clear. When photos or video frames are attached, examine them carefully and describe or answer directly based on what is shown.',
   };
 
   const openAiMessages = [
     systemPrompt,
     ...recentMessages.map((m: any, idx: number) => {
-      if (idx === recentMessages.length - 1 && hasImages) {
+      if (idx === recentMessages.length - 1 && hasImageParts) {
         const parts: any[] = [];
-        if (m.content) {
-          parts.push({ type: 'text', text: m.content });
+        const hasVideoFrames = imageLikeAttachments.some((att: any) => att.kind === 'video-frame');
+        const baseText = m.content || '';
+        const annotatedText = hasVideoFrames
+          ? `${baseText}\n\n[Note: The attached images below are chronological keyframes captured from the user's uploaded video. Analyze them as scenes from that video.]`.trim()
+          : baseText;
+        if (annotatedText) {
+          parts.push({ type: 'text', text: annotatedText });
         }
-        for (const att of safeAttachments) {
-          if (att.mimeType.startsWith('image/')) {
-            parts.push({
-              type: 'image_url',
-              image_url: { url: `data:${att.mimeType};base64,${att.data}` },
-            });
-          }
+        for (const att of imageLikeAttachments) {
+          const cleanMime = att.mimeType.split(';')[0].trim() || 'image/jpeg';
+          const cleanData = String(att.data).includes(',') ? String(att.data).split(',')[1] : String(att.data);
+          parts.push({
+            type: 'image_url',
+            image_url: { url: `data:${cleanMime};base64,${cleanData}` },
+          });
         }
         return { role: m.role, content: parts.length > 0 ? parts : m.content || '' };
       }
@@ -450,35 +534,55 @@ export async function handleChatRequest(params: {
 
   const plainMessages = [systemPrompt, ...recentMessages];
 
-  // Tier 1: Xkiro API
-  const xkiroResult = await callXkiroChat(openAiMessages, hasImages);
-  if (xkiroResult) {
-    return {
-      status: 200,
-      body: {
-        content: xkiroResult.content,
-        voiceTranscript: voiceTranscript || undefined,
-        tokensUsed: xkiroResult.tokensUsed,
-        provider: `Xkiro (${xkiroResult.modelUsed})`,
-      },
-    };
+  // If raw audio wasn't transcribed or raw video was sent without image frames, let Gemini natively inspect the audio/video first
+  if ((audioAtt && !voiceTranscript) || hasRawVideoOnly) {
+    const geminiDirect = await callGeminiFallbackChat(recentMessages, safeAttachments);
+    if (geminiDirect) {
+      return {
+        status: 200,
+        body: {
+          content: geminiDirect.content,
+          voiceTranscript: voiceTranscript || undefined,
+          tokensUsed: geminiDirect.tokensUsed,
+          provider: `Gemini (${geminiDirect.modelUsed})`,
+        },
+      };
+    }
   }
 
-  // Tier 2: Hugging Face Router (if HF_TOKEN is configured)
-  const hfResult = await callHuggingFaceChat(openAiMessages, clientHfToken);
-  if (hfResult) {
-    return {
-      status: 200,
-      body: {
-        content: hfResult.content,
-        voiceTranscript: voiceTranscript || undefined,
-        tokensUsed: hfResult.tokensUsed,
-        provider: `HuggingFace (${hfResult.modelUsed})`,
-      },
-    };
+  // Tier 1: Xkiro API (only when not blocked by untranscribed audio or unframed video)
+  if (!hasRawVideoOnly && !(audioAtt && !voiceTranscript)) {
+    const xkiroResult = await callXkiroChat(openAiMessages, hasImageParts);
+    if (xkiroResult) {
+      return {
+        status: 200,
+        body: {
+          content: xkiroResult.content,
+          voiceTranscript: voiceTranscript || undefined,
+          tokensUsed: xkiroResult.tokensUsed,
+          provider: `Xkiro (${xkiroResult.modelUsed})`,
+        },
+      };
+    }
   }
 
-  // Tier 3: Gemini Fallback (if GEMINI_API_KEY is configured)
+  // Tier 2: Hugging Face Router (Vision-Language models when images/frames attached)
+  if (!hasRawVideoOnly) {
+    const hfResult = await callHuggingFaceChat(openAiMessages, clientHfToken, hasImageParts);
+    if (hfResult) {
+      return {
+        status: 200,
+        body: {
+          content: hfResult.content,
+          voiceTranscript: voiceTranscript || undefined,
+          tokensUsed: hfResult.tokensUsed,
+          provider: `HuggingFace (${hfResult.modelUsed})`,
+        },
+      };
+    }
+  }
+
+  // Tier 3: Gemini Multimodal Fallback (supports text, images, video, and audio)
   const geminiResult = await callGeminiFallbackChat(recentMessages, safeAttachments);
   if (geminiResult) {
     return {
@@ -492,21 +596,27 @@ export async function handleChatRequest(params: {
     };
   }
 
-  // Tier 4: Zero-key failover (Pollinations -> AI Horde)
-  const zeroKeyResult = await callZeroKeyFallbackChat(plainMessages);
-  if (zeroKeyResult) {
-    return {
-      status: 200,
-      body: {
-        content: zeroKeyResult.content,
-        voiceTranscript: voiceTranscript || undefined,
-        tokensUsed: zeroKeyResult.tokensUsed,
-        provider: zeroKeyResult.modelUsed,
-      },
-    };
+  // Tier 4: Zero-key failover (Pollinations Vision/Text -> AI Horde text-only)
+  if (!hasRawVideoOnly && !(audioAtt && !voiceTranscript)) {
+    const zeroKeyResult = await callZeroKeyFallbackChat(plainMessages, openAiMessages, hasImageParts);
+    if (zeroKeyResult) {
+      return {
+        status: 200,
+        body: {
+          content: zeroKeyResult.content,
+          voiceTranscript: voiceTranscript || undefined,
+          tokensUsed: zeroKeyResult.tokensUsed,
+          provider: zeroKeyResult.modelUsed,
+        },
+      };
+    }
   }
 
-  const hint = !getXkiroApiKey()
+  const hint = audioAtt && !voiceTranscript
+    ? 'Could not hear any speech in that voice recording. Please speak clearly and try again.'
+    : hasVisualMedia
+    ? 'Vision analysis servers are temporarily busy. Please try again in a moment.'
+    : !getXkiroApiKey()
     ? 'Please configure XKIRO_API_KEY in Settings -> Secrets to enable Xkiro chat, or retry in a few moments.'
     : 'AI chat servers are temporarily busy. Please try again in a moment.';
   return { status: 503, body: { error: hint } };
@@ -1565,6 +1675,156 @@ export async function generateAiHordeImg2ImgBuffer(
   return null;
 }
 
+export async function generateAiPhotoEditViaHuggingFace(
+  sourceBuffer: Buffer,
+  sourceMime: string,
+  editInstruction: string,
+  clientHfToken?: string
+): Promise<{ buffer: Buffer; mimeType: string; provider: string } | null> {
+  const token = clientHfToken || getHfAccessToken();
+  if (!token) return null;
+
+  // 1. Try Hugging Face Inference Providers (FLUX.1-Kontext-dev & Qwen-Image-Edit)
+  try {
+    const client = new InferenceClient(token);
+    const inputBlob = new Blob([new Uint8Array(sourceBuffer)], { type: sourceMime || 'image/jpeg' });
+    const providers: Array<{ model: string; provider: 'fal-ai' | 'wavespeed' }> = [
+      { model: 'black-forest-labs/FLUX.1-Kontext-dev', provider: 'fal-ai' },
+      { model: 'Qwen/Qwen-Image-Edit', provider: 'fal-ai' },
+      { model: 'black-forest-labs/FLUX.1-Kontext-dev', provider: 'wavespeed' },
+      { model: 'Qwen/Qwen-Image-Edit', provider: 'wavespeed' },
+    ];
+    for (const item of providers) {
+      try {
+        const outBlob = await client.imageToImage(
+          {
+            model: item.model,
+            inputs: inputBlob,
+            provider: item.provider,
+            parameters: { prompt: editInstruction },
+          } as any,
+          { signal: AbortSignal.timeout(15000) }
+        );
+        if (outBlob && outBlob.size > 4000) {
+          const buf = Buffer.from(await outBlob.arrayBuffer());
+          if (buf.length > 4000) {
+            return {
+              buffer: buf,
+              mimeType: detectImageMimeType(buf, 'image/jpeg'),
+              provider: `HuggingFace-${item.model.split('/').pop()}`,
+            };
+          }
+        }
+      } catch (err: any) {
+        if (/401|402|403|payment|credit|balance/i.test(String(err?.message || err))) break;
+      }
+    }
+  } catch {
+    // Fall through to Gradio editing spaces
+  }
+
+  // 2. Try live RUNNING ZeroGPU Photo-Editing Spaces with HF_TOKEN
+  const authHeaders: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'X-HF-Token': token,
+  };
+  const editSpaces = [
+    {
+      baseUrl: 'https://multimodalart-qwen-image-edit-fast.hf.space',
+      buildData: (uploadedPath: string) => [
+        { path: uploadedPath, orig_name: 'photo.jpg', mime_type: sourceMime, meta: { _type: 'gradio.FileData' } },
+        editInstruction,
+        0,
+        true,
+        1,
+        8,
+        false,
+      ],
+      provider: 'Qwen-Image-Edit-Fast',
+    },
+    {
+      baseUrl: 'https://black-forest-labs-flux-1-kontext-dev.hf.space',
+      buildData: (uploadedPath: string) => [
+        { path: uploadedPath, orig_name: 'photo.jpg', mime_type: sourceMime, meta: { _type: 'gradio.FileData' } },
+        editInstruction,
+        0,
+        true,
+        2.5,
+        20,
+      ],
+      provider: 'FLUX.1-Kontext-Dev',
+    },
+    {
+      baseUrl: 'https://qwen-qwen-image-edit.hf.space',
+      buildData: (uploadedPath: string) => [
+        { path: uploadedPath, orig_name: 'photo.jpg', mime_type: sourceMime, meta: { _type: 'gradio.FileData' } },
+        editInstruction,
+        0,
+        true,
+        4,
+        24,
+        false,
+      ],
+      provider: 'Qwen-Image-Edit',
+    },
+  ];
+
+  for (const sp of editSpaces) {
+    try {
+      const form = new FormData();
+      form.append('files', new Blob([new Uint8Array(sourceBuffer)], { type: sourceMime || 'image/jpeg' }), 'photo.jpg');
+      const upRes = await fetch(`${sp.baseUrl}/gradio_api/upload`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: form,
+        signal: AbortSignal.timeout(7000),
+      });
+      if (!upRes.ok) continue;
+      const uploadedPaths: any = await upRes.json();
+      const uploadedPath = Array.isArray(uploadedPaths) ? uploadedPaths[0] : '';
+      if (!uploadedPath) continue;
+
+      const postRes = await fetch(`${sp.baseUrl}/gradio_api/call/infer`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: sp.buildData(uploadedPath) }),
+        signal: AbortSignal.timeout(7000),
+      });
+      if (!postRes.ok) continue;
+      const postJson: any = await postRes.json();
+      if (!postJson?.event_id) continue;
+
+      const sseRes = await fetch(`${sp.baseUrl}/gradio_api/call/infer/${postJson.event_id}`, {
+        headers: authHeaders,
+        signal: AbortSignal.timeout(18000),
+      });
+      if (!sseRes.ok) continue;
+      const sseText = await sseRes.text();
+      if (sseText.includes('event: error')) continue;
+      const match = sseText.match(/"url":\s*"([^"]+)"/);
+      if (!match?.[1]) continue;
+
+      const imgUrl = match[1].startsWith('http')
+        ? match[1]
+        : `${sp.baseUrl}/gradio_api/file=${match[1]}`;
+      const imgRes = await fetch(imgUrl, { headers: authHeaders, signal: AbortSignal.timeout(8000) });
+      if (!imgRes.ok) continue;
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      if (buf.length > 4000) {
+        return {
+          buffer: buf,
+          mimeType: detectImageMimeType(buf, 'image/webp'),
+          provider: sp.provider,
+        };
+      }
+    } catch {
+      // Try next edit space
+    }
+  }
+
+  return null;
+}
+
 export async function editPhotoWithSenseNova(
   sourceBuffer: Buffer,
   sourceMime: string,
@@ -1572,7 +1832,8 @@ export async function editPhotoWithSenseNova(
   editInstruction: string,
   requestedAspect: PhotoAspectOption,
   quality: PhotoQualityOption,
-  hooks?: PhotoBinaryHooks
+  hooks?: PhotoBinaryHooks,
+  clientHfToken?: string
 ): Promise<{ buffer: Buffer; mimeType: string; aspectRatio: PhotoAspectOption; provider: string } | null> {
   const fastDims = parseImageDimensionsFast(sourceBuffer);
   const dims = fastDims || (hooks?.probeDimensions ? await hooks.probeDimensions(sourceBuffer) : null);
@@ -1616,6 +1877,25 @@ export async function editPhotoWithSenseNova(
   const effectiveAspect = img2imgPlan.targetAspect || naturalAspect;
   const { width, height, jpegQ } = getPhotoDimensions(effectiveAspect, quality);
 
+  // 1. Try instruction-based AI image editors (FLUX.1-Kontext-dev / Qwen-Image-Edit)
+  const hfEdited = await generateAiPhotoEditViaHuggingFace(
+    sourceBuffer,
+    sourceMime,
+    editInstruction,
+    clientHfToken
+  );
+  if (hfEdited) {
+    const formatted = hooks?.enhancePhoto
+      ? await hooks.enhancePhoto(hfEdited.buffer, hfEdited.mimeType, width, height, jpegQ)
+      : { buffer: hfEdited.buffer, mimeType: hfEdited.mimeType };
+    return {
+      ...formatted,
+      aspectRatio: effectiveAspect,
+      provider: hfEdited.provider,
+    };
+  }
+
+  // 2. Fallback to AI Horde img2img anchored to uploaded pixels
   const editedRaw = await generateAiHordeImg2ImgBuffer(
     sourceBuffer,
     img2imgPlan.editedPrompt,
@@ -1664,7 +1944,7 @@ export async function submitAiHordeImg2ImgJob(
     'stable_diffusion',
   ];
 
-  const submitImg2Img = (w: number, h: number, steps: number, models: string[]) =>
+  const submitImg2Img = (imgBuf: Buffer, w: number, h: number, steps: number, models: string[]) =>
     fetch('https://stablehorde.net/api/v2/generate/async', {
       method: 'POST',
       headers: {
@@ -1674,7 +1954,7 @@ export async function submitAiHordeImg2ImgJob(
       },
       body: JSON.stringify({
         prompt: `${editedPrompt} ### blurry, deformed, bad anatomy, watermark, text, low quality`,
-        source_image: sourceBuffer.toString('base64'),
+        source_image: imgBuf.toString('base64'),
         source_processing: 'img2img',
         params: {
           width: w,
@@ -1694,9 +1974,9 @@ export async function submitAiHordeImg2ImgJob(
     });
 
   try {
-    let submitRes = await submitImg2Img(hordeW, hordeH, 16, hordeModels);
+    let submitRes = await submitImg2Img(sourceBuffer, hordeW, hordeH, 16, hordeModels);
     if (submitRes.status === 403 || submitRes.status === 400) {
-      submitRes = await submitImg2Img(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+      submitRes = await submitImg2Img(sourceBuffer, 512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
     }
     if (!submitRes.ok) return null;
     const submitJson: any = await submitRes.json();
@@ -1763,7 +2043,7 @@ export async function handleGenerateImageRequest(
           }))
       : [];
 
-    // Serverless fast path (no FFmpeg): plan via Xkiro Vision and return instant filterPlan or async Horde img2img jobId (<7s)
+    // Serverless fast path (no FFmpeg): plan via Xkiro Vision and try fast HF instruction editor or return filterPlan / async Horde jobId
     if (!hooks?.enhancePhoto) {
       const fastDims = parseImageDimensionsFast(sourceBuffer);
       const naturalAspect = fastDims ? pickClosestPhotoAspect(fastDims.width, fastDims.height) : aspectRatio;
@@ -1799,6 +2079,26 @@ export async function handleGenerateImageRequest(
       }
 
       const effectiveAspect = plan.targetAspect || naturalAspect;
+      const hfEdited = await generateAiPhotoEditViaHuggingFace(
+        sourceBuffer,
+        rawMime,
+        cleanPrompt,
+        clientHfToken
+      );
+      if (hfEdited) {
+        return {
+          status: 200,
+          body: {
+            imageUrl: `data:${hfEdited.mimeType};base64,${hfEdited.buffer.toString('base64')}`,
+            prompt: cleanPrompt,
+            aspectRatio: effectiveAspect,
+            quality,
+            edited: true,
+            provider: hfEdited.provider,
+          },
+        };
+      }
+
       const hordeJobId = await submitAiHordeImg2ImgJob(
         sourceBuffer,
         plan.editedPrompt,
@@ -1840,7 +2140,8 @@ export async function handleGenerateImageRequest(
       cleanPrompt,
       aspectRatio,
       quality,
-      hooks
+      hooks,
+      clientHfToken
     );
     if (edited) {
       const b64 = edited.buffer.toString('base64');
@@ -2041,8 +2342,8 @@ export async function generateViaHfInferenceRouterVideo(
           return { buffer, model: attempt.model };
         }
       }
-    } catch {
-      // Try next inference provider
+    } catch (err: any) {
+      if (/401|402|403|payment|credit|balance/i.test(String(err?.message || err))) break;
     }
   }
   return null;
@@ -2050,10 +2351,131 @@ export async function generateViaHfInferenceRouterVideo(
 
 export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
   {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
+    endpoint: '/generate_video',
+    startPct: 10,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const arChoice =
+        aspectRatio === '9:16'
+          ? '9:16 (480x832)'
+          : aspectRatio === '1:1'
+          ? '1:1 (640x640)'
+          : '16:9 (832x480)';
+      return [
+        wanPrompt,
+        arChoice,
+        4,
+        WAN_NEGATIVE_PROMPT,
+        4,
+        1,
+        1,
+        Math.floor(Math.random() * 2147483647),
+        true,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.5',
+    baseUrl: 'https://lightricks-ltx-2-5.hf.space',
+    endpoint: '/run',
+    startPct: 12,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [h, w] =
+        aspectRatio === '9:16'
+          ? [832, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 832];
+      return [
+        wanPrompt,
+        null,
+        h,
+        w,
+        2,
+        42,
+        'conv',
+        false,
+        true,
+        false,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.3',
+    baseUrl: 'https://lightricks-ltx-2-3.hf.space',
+    endpoint: '/generate_video',
+    startPct: 14,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [h, w] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        null,
+        wanPrompt,
+        3,
+        false,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        h,
+        w,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-Video-Distilled',
+    baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
+    endpoint: '/text_to_video',
+    startPct: 15,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [h, w] =
+        aspectRatio === '9:16'
+          ? [704, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 704];
+      return [
+        wanPrompt,
+        WAN_NEGATIVE_PROMPT,
+        '',
+        '',
+        h,
+        w,
+        'text-to-video',
+        3,
+        9,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        1.0,
+        false,
+      ];
+    },
+  },
+  {
+    model: 'damo-vilab/text-to-video-ms-1.7b',
+    baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
+    endpoint: '/generate',
+    startPct: 16,
+    endPct: 92,
+    buildPayload: (wanPrompt) => [
+      wanPrompt,
+      -1,
+      24,
+      25,
+    ],
+  },
+  {
     model: WAN21_BASE_T2V_MODEL,
     baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
     endpoint: '/generate',
-    startPct: 10,
+    startPct: 22,
     endPct: 92,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [wanW, wanH] =
@@ -2078,110 +2500,10 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     },
   },
   {
-    model: WAN22_14B_T2V_MODEL,
-    baseUrl: 'https://prithivmlmods-wan2-2-fast.hf.space',
-    endpoint: '/generate_video',
-    startPct: 14,
-    endPct: 92,
-    buildPayload: (wanPrompt) => [
-      null,
-      wanPrompt,
-      4,
-      WAN_NEGATIVE_PROMPT,
-      4.0,
-      1,
-      1,
-      Math.floor(Math.random() * 2147483647),
-      true,
-    ],
-  },
-  {
-    model: 'Lightricks/LTX-Video-Distilled',
-    baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
-    endpoint: '/text_to_video',
-    startPct: 16,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
-      const [ltxH, ltxW] =
-        aspectRatio === '9:16'
-          ? [704, 512]
-          : aspectRatio === '1:1'
-          ? [512, 512]
-          : [512, 704];
-      return [
-        wanPrompt,
-        'worst quality, inconsistent motion, blurry, jittery, distorted',
-        null,
-        null,
-        ltxH,
-        ltxW,
-        'text-to-video',
-        3,
-        9,
-        Math.floor(Math.random() * 2147483647),
-        true,
-        1,
-        true,
-      ];
-    },
-  },
-  {
-    model: 'Lightricks/LTX-2.5',
-    baseUrl: 'https://upsampler-ltx-2-5.hf.space',
-    endpoint: '/generate_video',
-    startPct: 18,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
-      const [ltxH, ltxW] =
-        aspectRatio === '9:16'
-          ? [768, 512]
-          : aspectRatio === '1:1'
-          ? [512, 512]
-          : [512, 768];
-      return [
-        wanPrompt,
-        null,
-        ltxH,
-        ltxW,
-        3,
-        Math.floor(Math.random() * 2147483647),
-        'conv',
-        false,
-        true,
-        false,
-      ];
-    },
-  },
-  {
-    model: 'Lightricks/LTX-2.3',
-    baseUrl: 'https://lightricks-ltx-2-3.hf.space',
-    endpoint: '/generate_video',
-    startPct: 20,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
-      const [ltxH, ltxW] =
-        aspectRatio === '9:16'
-          ? [768, 512]
-          : aspectRatio === '1:1'
-          ? [512, 512]
-          : [512, 768];
-      return [
-        null,
-        wanPrompt,
-        3,
-        false,
-        Math.floor(Math.random() * 2147483647),
-        true,
-        ltxH,
-        ltxW,
-      ];
-    },
-  },
-  {
     model: 'Lightricks/LTX-2-Turbo',
     baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
     endpoint: '/generate_video',
-    startPct: 22,
+    startPct: 28,
     endPct: 92,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [ltxH, ltxW] =
@@ -2207,28 +2529,27 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     },
   },
   {
-    model: WAN22_14B_T2V_MODEL,
-    baseUrl: 'https://prashant-ai-ml-wan-2-2-pro-superb.hf.space',
-    endpoint: '/generate_video',
-    startPct: 24,
+    model: 'zai-org/CogVideoX-2b',
+    baseUrl: 'https://zai-org-cogvideox-2b-space.hf.space',
+    endpoint: '/generate',
+    startPct: 34,
+    endPct: 92,
+    buildPayload: (wanPrompt) => [wanPrompt, 35, 6],
+  },
+  {
+    model: 'zai-org/CogVideoX-5b',
+    baseUrl: 'https://zai-org-cogvideox-5b-space.hf.space',
+    endpoint: '/generate',
+    startPct: 40,
     endPct: 92,
     buildPayload: (wanPrompt) => [
-      null,
-      null,
       wanPrompt,
-      4,
-      WAN_NEGATIVE_PROMPT,
-      4.0,
-      1,
-      1,
-      Math.floor(Math.random() * 2147483647),
-      true,
-      6,
-      'UniPCMultistep',
-      3,
-      16,
-      true,
-      true,
+      null,
+      null,
+      0.8,
+      -1,
+      false,
+      false,
     ],
   },
 ];
@@ -2289,39 +2610,43 @@ export async function submitWanSpaceTier(
   tierIdx: number,
   cleanPrompt: string,
   aspectRatio: VideoAspectOption
-): Promise<{ eventId: string | null; quotaExceeded: boolean }> {
+): Promise<{ eventId: string | null; quotaExceeded: boolean; anonymous?: boolean }> {
   const tier = WAN_SPACE_TIERS[tierIdx];
   if (!tier) return { eventId: null, quotaExceeded: false };
 
   const token = getHfAccessToken();
-  const authHeaders: Record<string, string> = token
-    ? { Authorization: `Bearer ${token}`, 'X-HF-Token': token }
-    : {};
+  const headerSets: Array<{ headers: Record<string, string>; anonymous: boolean }> = token
+    ? [
+        { headers: { Authorization: `Bearer ${token}`, 'X-HF-Token': token }, anonymous: false },
+        { headers: {}, anonymous: true },
+      ]
+    : [{ headers: {}, anonymous: true }];
   const wanPrompt = buildWanTextToVideoPrompt(cleanPrompt, aspectRatio);
 
-  try {
-    const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
-      method: 'POST',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio) }),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!postRes.ok) {
-      const errBody = await postRes.text().catch(() => '');
-      return {
-        eventId: null,
-        quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(errBody),
-      };
+  let sawQuota = false;
+  for (const item of headerSets) {
+    try {
+      const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
+        method: 'POST',
+        headers: { ...item.headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio) }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!postRes.ok) {
+        const errBody = await postRes.text().catch(() => '');
+        if (/ZeroGPU quota|exceeded your.*quota/i.test(errBody)) sawQuota = true;
+        continue;
+      }
+      const postJson: any = await postRes.json();
+      const eventId = typeof postJson?.event_id === 'string' ? postJson.event_id.trim() : '';
+      if (eventId && /^[a-zA-Z0-9._-]{3,120}$/.test(eventId)) {
+        return { eventId, quotaExceeded: false, anonymous: item.anonymous };
+      }
+    } catch {
+      // Try anonymous fallback or next tier
     }
-    const postJson: any = await postRes.json();
-    const eventId = typeof postJson?.event_id === 'string' ? postJson.event_id.trim() : '';
-    if (!eventId || !/^[a-zA-Z0-9._-]{3,120}$/.test(eventId)) {
-      return { eventId: null, quotaExceeded: false };
-    }
-    return { eventId, quotaExceeded: false };
-  } catch {
-    return { eventId: null, quotaExceeded: false };
   }
+  return { eventId: null, quotaExceeded: sawQuota };
 }
 
 export async function startStatelessVideoJob(body: any): Promise<{ status: number; body: any }> {

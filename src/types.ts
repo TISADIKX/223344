@@ -9,6 +9,8 @@ export interface AttachedMedia {
   previewUrl: string;
   base64Data: string;
   aspectRatio?: PhotoAspectRatio;
+  frames?: Array<{ data: string; mimeType: string; timeSec: number }>;
+  durationSec?: number;
 }
 
 export interface RecordedVoice {
@@ -18,6 +20,7 @@ export interface RecordedVoice {
   base64Data: string;
   mimeType: string;
   durationSeconds: number;
+  speechTranscript?: string;
 }
 
 export interface MessageAttachment {

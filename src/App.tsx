@@ -300,6 +300,8 @@ export default function App() {
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const discardRecordingRef = useRef<boolean>(false);
+  const speechRecognitionRef = useRef<any>(null);
+  const speechTranscriptRef = useRef<string>('');
   const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recordingSecondsRef = useRef<number>(0);
   const videoProgressFloorRef = useRef<number>(0);
@@ -559,6 +561,11 @@ export default function App() {
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
       }
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch (_e) {}
+      }
       if (audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -662,7 +669,7 @@ export default function App() {
           const naturalW = img.naturalWidth || 512;
           const naturalH = img.naturalHeight || 512;
           const aspectRatio = detectClosestPhotoAspect(naturalW, naturalH);
-          const maxDim = 1400;
+          const maxDim = 1024;
           const scale = Math.max(naturalW, naturalH) > maxDim ? maxDim / Math.max(naturalW, naturalH) : 1;
           const targetW = Math.max(1, Math.round(naturalW * scale));
           const targetH = Math.max(1, Math.round(naturalH * scale));
@@ -675,9 +682,9 @@ export default function App() {
 
           ctx.drawImage(img, 0, 0, targetW, targetH);
           const outMime = 'image/jpeg';
-          let dataUrl = canvas.toDataURL(outMime, 0.88);
-          if (dataUrl.length > 2_000_000) {
-            dataUrl = canvas.toDataURL(outMime, 0.74);
+          let dataUrl = canvas.toDataURL(outMime, 0.84);
+          if (dataUrl.length > 1_200_000) {
+            dataUrl = canvas.toDataURL(outMime, 0.7);
           }
           const base64Data = dataUrl.split(',')[1] || '';
           URL.revokeObjectURL(tempBlob);
@@ -713,6 +720,98 @@ export default function App() {
           .catch(reject);
       };
       img.src = tempBlob;
+    });
+  };
+
+  // Extract chronological JPEG keyframes from uploaded videos so Vision & multimodal AI models can explain any video cleanly
+  const prepareVideoAttachment = (
+    file: File,
+    previewUrl: string
+  ): Promise<{ frames: Array<{ data: string; mimeType: string; timeSec: number }>; durationSec: number }> => {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+
+      let settled = false;
+      const frames: Array<{ data: string; mimeType: string; timeSec: number }> = [];
+      let durationSec = 0;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(overallTimer);
+        video.removeAttribute('src');
+        video.load();
+        resolve({ frames, durationSec });
+      };
+
+      const overallTimer = setTimeout(finish, 7500);
+
+      const captureCurrentFrame = (timeSec: number) => {
+        const vw = video.videoWidth || 640;
+        const vh = video.videoHeight || 360;
+        if (!vw || !vh) return;
+        const maxDim = 576;
+        const scale = Math.max(vw, vh) > maxDim ? maxDim / Math.max(vw, vh) : 1;
+        const cw = Math.max(1, Math.round(vw * scale));
+        const ch = Math.max(1, Math.round(vh * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, cw, ch);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+        const b64 = dataUrl.split(',')[1] || '';
+        if (b64) {
+          frames.push({ data: b64, mimeType: 'image/jpeg', timeSec });
+        }
+      };
+
+      video.onloadeddata = async () => {
+        try {
+          durationSec = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+          const ratios = durationSec >= 1.2 ? [0.08, 0.35, 0.65, 0.9] : [0.1];
+          const targets = ratios.map((r) =>
+            durationSec > 0 ? Math.min(Math.max(0.05, durationSec * r), Math.max(0.05, durationSec - 0.1)) : 0
+          );
+
+          for (const targetSec of targets) {
+            if (settled) break;
+            if (durationSec > 0.2) {
+              await new Promise<void>((seekResolve) => {
+                let seekDone = false;
+                const doneSeek = () => {
+                  if (!seekDone) {
+                    seekDone = true;
+                    seekResolve();
+                  }
+                };
+                const t = setTimeout(doneSeek, 1400);
+                video.onseeked = () => {
+                  clearTimeout(t);
+                  doneSeek();
+                };
+                try {
+                  video.currentTime = targetSec;
+                } catch {
+                  clearTimeout(t);
+                  doneSeek();
+                }
+              });
+            }
+            captureCurrentFrame(targetSec);
+          }
+        } catch {
+          // Return whatever keyframes were captured
+        }
+        finish();
+      };
+
+      video.onerror = () => finish();
+      video.src = previewUrl;
     });
   };
 
@@ -833,10 +932,15 @@ export default function App() {
     const currentPhotos = attachedFiles.filter(f => f.type === 'image');
     const currentVideos = attachedFiles.filter(f => f.type === 'video');
 
-    const newPhotos = filesArray.filter(f => f.type.startsWith('image/'));
-    const newVideos = filesArray.filter(f => f.type.startsWith('video/'));
+    const isImageFile = (f: File) =>
+      f.type.startsWith('image/') || /\.(?:png|jpe?g|webp|gif|bmp|heic|heif|avif)$/i.test(f.name);
+    const isVideoFile = (f: File) =>
+      f.type.startsWith('video/') || /\.(?:mp4|mov|webm|m4v|mkv|avi|3gp)$/i.test(f.name);
+
+    const newPhotos = filesArray.filter(isImageFile);
+    const newVideos = filesArray.filter(f => !isImageFile(f) && isVideoFile(f));
     const unsupportedFiles = filesArray.filter(
-      f => !f.type.startsWith('image/') && !f.type.startsWith('video/')
+      f => !isImageFile(f) && !isVideoFile(f)
     );
 
     if (unsupportedFiles.length > 0 && newPhotos.length === 0 && newVideos.length === 0) {
@@ -861,14 +965,15 @@ export default function App() {
 
     const processedMedia: AttachedMedia[] = [];
     for (const file of filesToAdd) {
-      const isVideo = file.type.startsWith('video/');
+      const isVideo = isVideoFile(file) && !isImageFile(file);
       if (isVideo) {
         if (file.size > 25 * 1024 * 1024) {
           setUploadError(`Video "${file.name}" is larger than 25MB. Please pick a smaller video.`);
           continue;
         }
         const previewUrl = URL.createObjectURL(file);
-        const base64Data = await fileToBase64(file);
+        const extracted = await prepareVideoAttachment(file, previewUrl);
+        const base64Data = file.size <= 3_500_000 ? await fileToBase64(file) : '';
         processedMedia.push({
           id: `${file.name}-${Date.now()}-${Math.random()}`,
           file,
@@ -877,6 +982,8 @@ export default function App() {
           type: 'video',
           previewUrl,
           base64Data,
+          frames: extracted.frames,
+          durationSec: extracted.durationSec,
         });
       } else {
         try {
@@ -931,6 +1038,13 @@ export default function App() {
       timerIntervalRef.current = null;
     }
 
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch (_e) {}
+      speechRecognitionRef.current = null;
+    }
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
         mediaRecorderRef.current.stop();
@@ -951,6 +1065,7 @@ export default function App() {
     setMicError(null);
     discardRecordedVoice();
     discardRecordingRef.current = false;
+    speechTranscriptRef.current = '';
     audioChunksRef.current = [];
     recordingSecondsRef.current = 0;
     setRecordingSeconds(0);
@@ -969,6 +1084,39 @@ export default function App() {
         },
       });
       audioStreamRef.current = stream;
+
+      // Capture live browser speech recognition transcript alongside audio blob as an automatic backup
+      try {
+        const SpeechRecCtor =
+          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (typeof SpeechRecCtor === 'function') {
+          const rec = new SpeechRecCtor();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = navigator.language || 'en-US';
+          let finalizedText = '';
+          rec.onresult = (event: any) => {
+            let interim = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const transcriptPiece = event.results[i]?.[0]?.transcript || '';
+              if (event.results[i].isFinal) {
+                finalizedText = `${finalizedText} ${transcriptPiece}`.trim();
+              } else {
+                interim = `${interim} ${transcriptPiece}`.trim();
+              }
+            }
+            const combined = `${finalizedText} ${interim}`.trim();
+            if (combined) {
+              speechTranscriptRef.current = combined;
+            }
+          };
+          rec.onerror = () => {};
+          rec.start();
+          speechRecognitionRef.current = rec;
+        }
+      } catch {
+        // Browser speech recognition optional backup
+      }
 
       const candidateMimes = [
         'audio/webm;codecs=opus',
@@ -1013,6 +1161,7 @@ export default function App() {
           Math.max(1, recordingSecondsRef.current)
         );
         const blobUrl = URL.createObjectURL(audioBlob);
+        const capturedHint = speechTranscriptRef.current.trim();
 
         const reader = new FileReader();
         reader.onloadend = () => {
@@ -1025,6 +1174,7 @@ export default function App() {
             base64Data,
             mimeType: cleanMime,
             durationSeconds: capturedDuration,
+            speechTranscript: capturedHint || undefined,
           });
         };
         reader.readAsDataURL(audioBlob);
@@ -1274,7 +1424,7 @@ export default function App() {
     if (
       chatMode === 'photo' &&
       attachedImagesForPhotoEdit.length === 0 &&
-      /\b(?:this|the|that|previous|last|above)\s+(?:photo|image|picture)\b|\b(?:edit|change|turn|make|crop|rotate|filter)\s+it\b/i.test(
+      /\b(?:this|the|that|previous|last|above)\s+(?:photo|image|picture|one)\b|\b(?:edit|change|modify|replace|remove|delete|erase|add|put|turn|make|crop|rotate|flip|filter|enhance|fix|recolor|darken|brighten)\s+(?:it|the|his|her|their|my|this|that)\b|\b(?:black\s*(?:&|and)?\s*white|grayscale|greyscale|sepia|vintage|blur\s+(?:the\s+)?background)\b/i.test(
         text
       )
     ) {
@@ -1407,12 +1557,16 @@ export default function App() {
           body: JSON.stringify({
             audioData: currentVoice.base64Data,
             mimeType: currentVoice.mimeType,
+            transcriptHint: currentVoice.speechTranscript,
           }),
         });
         if (res.ok) {
           const data = await res.json();
-          if (data?.text && typeof data.text === 'string' && data.text.trim()) {
-            const spoken = data.text.trim();
+          const spoken =
+            typeof data?.text === 'string' && data.text.trim()
+              ? data.text.trim()
+              : currentVoice.speechTranscript?.trim() || '';
+          if (spoken) {
             if (wasNewSession && currentSessionId) {
               handleRenameSession(currentSessionId, spoken.slice(0, 36));
             }
@@ -1420,7 +1574,7 @@ export default function App() {
           }
         }
       } catch (_tErr) {}
-      return '';
+      return currentVoice.speechTranscript?.trim() || '';
     };
 
     // Photo Mode: Generate new photo or edit uploaded photo -> seamless decoded reveal
@@ -1478,7 +1632,7 @@ export default function App() {
               ...(sourceImagePayload ? { sourceImage: sourceImagePayload } : {}),
               ...(additionalImagesPayload ? { additionalImages: additionalImagesPayload } : {}),
             }),
-            signal: AbortSignal.timeout(20000),
+            signal: AbortSignal.timeout(isPhotoEditRequest ? 65000 : 35000),
           });
 
           if (response.ok) {
@@ -1697,7 +1851,7 @@ export default function App() {
             let sawActiveProgress = false;
             const initialActivityTimeout = setTimeout(() => {
               if (!sawActiveProgress) sseCtrl.abort();
-            }, 18000);
+            }, 40000);
 
             const sseRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}/${eventId}`, {
               signal: sseCtrl.signal,
@@ -1838,205 +1992,206 @@ export default function App() {
             ? [512, 512]
             : [512, 704];
 
-        const browserVideoTiers: Array<{
-          baseUrl: string;
-          endpoint: string;
-          payload: unknown[];
-          startPct: number;
-        }> = [
-          {
-            baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
-            endpoint: '/generate',
-            payload: ['wan-base', wanPrompt, wanNeg, w1W, w1H, 49, 18, 5, -1, 1, null],
-            startPct: 10,
-          },
-          {
-            baseUrl: 'https://prithivmlmods-wan2-2-fast.hf.space',
-            endpoint: '/generate_video',
-            payload: [
-              null,
-              wanPrompt,
-              4,
-              wanNeg,
-              4.0,
-              1,
-              1,
-              Math.floor(Math.random() * 2147483647),
-              true,
-            ],
-            startPct: 14,
-          },
-          {
-            baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
-            endpoint: '/text_to_video',
-            payload: [
-              wanPrompt,
-              'worst quality, inconsistent motion, blurry, jittery, distorted',
-              null,
-              null,
-              ltxDistH,
-              ltxDistW,
-              'text-to-video',
-              3,
-              9,
-              Math.floor(Math.random() * 2147483647),
-              true,
-              1,
-              true,
-            ],
-            startPct: 18,
-          },
-          {
-            baseUrl: 'https://upsampler-ltx-2-5.hf.space',
-            endpoint: '/generate_video',
-            payload: [
-              wanPrompt,
-              null,
-              ltxH,
-              ltxW,
-              3,
-              Math.floor(Math.random() * 2147483647),
-              'conv',
-              false,
-              true,
-              false,
-            ],
-            startPct: 22,
-          },
-          {
-            baseUrl: 'https://lightricks-ltx-2-3.hf.space',
-            endpoint: '/generate_video',
-            payload: [
-              null,
-              wanPrompt,
-              3,
-              false,
-              Math.floor(Math.random() * 2147483647),
-              true,
-              ltxH,
-              ltxW,
-            ],
-            startPct: 26,
-          },
-          {
-            baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
-            endpoint: '/generate_video',
-            payload: [
-              null,
-              null,
-              wanPrompt,
-              null,
-              'Text-to-Video',
-              false,
-              Math.floor(Math.random() * 2147483647),
-              true,
-              ltxH,
-              ltxW,
-              'No LoRA',
-              null,
-            ],
-            startPct: 30,
-          },
-          {
-            baseUrl: 'https://prashant-ai-ml-wan-2-2-pro-superb.hf.space',
-            endpoint: '/generate_video',
-            payload: [
-              null,
-              null,
-              wanPrompt,
-              4,
-              wanNeg,
-              4.0,
-              1,
-              1,
-              Math.floor(Math.random() * 2147483647),
-              true,
-              6,
-              'UniPCMultistep',
-              3,
-              16,
-              true,
-              true,
-            ],
-            startPct: 34,
-          },
-        ];
-
-        for (const tier of browserVideoTiers) {
-          if (finalVideoUrl) break;
-          const res = await callWanSpaceAndMaster(
-            tier.baseUrl,
-            tier.endpoint,
-            tier.payload,
-            tier.startPct,
-            81
-          );
-          finalVideoUrl = res.url;
-        }
-
-        // Server-authenticated Text-to-Video failover (HF Inference Providers + HF_TOKEN Spaces)
+        // 1. Server-authenticated Text-to-Video first (HF Inference Providers + HF_TOKEN Spaces)
         let serverJobFinishedWithFailure = false;
-        for (let jobAttempt = 0; jobAttempt < 1 && !finalVideoUrl && !serverJobFinishedWithFailure; jobAttempt++) {
-          try {
-            const startRes = await fetch('/api/generate-video', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt: cleanPrompt,
-                duration: selectedDuration,
-                aspectRatio: selectedAspect,
-                quality: selectedQuality,
-              }),
-              signal: AbortSignal.timeout(45000),
-            });
+        try {
+          const startRes = await fetch('/api/generate-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: cleanPrompt,
+              duration: selectedDuration,
+              aspectRatio: selectedAspect,
+              quality: selectedQuality,
+            }),
+            signal: AbortSignal.timeout(45000),
+          });
 
-            if (!startRes.ok) continue;
+          if (startRes.ok) {
             const startData = await startRes.json();
-
             if (startData?.videoUrl) {
               finalVideoUrl = startData.videoUrl;
-              break;
-            }
-
-            let activeJobId = startData?.jobId;
-            if (!activeJobId) continue;
-
-            let consecutiveServerErrors = 0;
-            for (let pollIdx = 0; pollIdx < 240; pollIdx++) {
-              await new Promise((r) => setTimeout(r, 950));
-              try {
-                const pollRes = await fetch(`/api/generate-video/status/${activeJobId}`, {
-                  signal: AbortSignal.timeout(55000),
-                });
-                if (!pollRes.ok) {
-                  if (pollRes.status === 404) break;
+            } else {
+              let activeJobId = startData?.jobId;
+              let consecutiveServerErrors = 0;
+              for (let pollIdx = 0; activeJobId && !finalVideoUrl && pollIdx < 240; pollIdx++) {
+                await new Promise((r) => setTimeout(r, 950));
+                try {
+                  const pollRes = await fetch(`/api/generate-video/status/${activeJobId}`, {
+                    signal: AbortSignal.timeout(55000),
+                  });
+                  if (!pollRes.ok) {
+                    if (pollRes.status === 404) break;
+                    consecutiveServerErrors += 1;
+                    if (consecutiveServerErrors >= 2) break;
+                    continue;
+                  }
+                  consecutiveServerErrors = 0;
+                  const pollData = await pollRes.json();
+                  if (typeof pollData?.nextJobId === 'string' && pollData.nextJobId) {
+                    activeJobId = pollData.nextJobId;
+                  }
+                  if (typeof pollData?.progress === 'number') {
+                    advanceVideoFloor(pollData.progress);
+                  }
+                  if (pollData?.status === 'completed' && pollData?.videoUrl) {
+                    finalVideoUrl = pollData.videoUrl;
+                    break;
+                  }
+                  if (pollData?.status === 'failed') {
+                    serverJobFinishedWithFailure = true;
+                    break;
+                  }
+                } catch {
                   consecutiveServerErrors += 1;
                   if (consecutiveServerErrors >= 2) break;
-                  continue;
                 }
-                consecutiveServerErrors = 0;
-                const pollData = await pollRes.json();
-                if (typeof pollData?.nextJobId === 'string' && pollData.nextJobId) {
-                  activeJobId = pollData.nextJobId;
-                }
-                if (typeof pollData?.progress === 'number') {
-                  advanceVideoFloor(pollData.progress);
-                }
-                if (pollData?.status === 'completed' && pollData?.videoUrl) {
-                  finalVideoUrl = pollData.videoUrl;
-                  break;
-                }
-                if (pollData?.status === 'failed') {
-                  serverJobFinishedWithFailure = true;
-                  break;
-                }
-              } catch {
-                consecutiveServerErrors += 1;
-                if (consecutiveServerErrors >= 2) break;
               }
             }
-          } catch {
-            // Honest busy error returned cleanly below when all real AI video providers are unavailable
+          }
+        } catch {
+          // Fall back cleanly to browser-edge verified live Spaces below
+        }
+
+        // 2. Fallback to verified RUNNING pure Text-to-Video browser-edge Spaces if server route did not succeed
+        if (!finalVideoUrl) {
+          const upsamplerAspect =
+            selectedAspect === '9:16'
+              ? '9:16 (480x832)'
+              : selectedAspect === '1:1'
+              ? '1:1 (640x640)'
+              : '16:9 (832x480)';
+          const browserVideoTiers: Array<{
+            baseUrl: string;
+            endpoint: string;
+            payload: unknown[];
+            startPct: number;
+          }> = [
+            {
+              baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
+              endpoint: '/generate_video',
+              payload: [
+                wanPrompt,
+                upsamplerAspect,
+                4,
+                wanNeg,
+                4,
+                1,
+                1,
+                Math.floor(Math.random() * 2147483647),
+                true,
+              ],
+              startPct: 14,
+            },
+            {
+              baseUrl: 'https://lightricks-ltx-2-5.hf.space',
+              endpoint: '/run',
+              payload: [
+                wanPrompt,
+                null,
+                selectedAspect === '9:16' ? 832 : 512,
+                selectedAspect === '9:16' ? 512 : selectedAspect === '1:1' ? 512 : 832,
+                2,
+                42,
+                'conv',
+                false,
+                true,
+                false,
+              ],
+              startPct: 18,
+            },
+            {
+              baseUrl: 'https://lightricks-ltx-2-3.hf.space',
+              endpoint: '/generate_video',
+              payload: [
+                null,
+                wanPrompt,
+                3,
+                false,
+                Math.floor(Math.random() * 2147483647),
+                true,
+                ltxH,
+                ltxW,
+              ],
+              startPct: 21,
+            },
+            {
+              baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
+              endpoint: '/text_to_video',
+              payload: [
+                wanPrompt,
+                wanNeg,
+                '',
+                '',
+                ltxDistH,
+                ltxDistW,
+                'text-to-video',
+                3,
+                9,
+                Math.floor(Math.random() * 2147483647),
+                true,
+                1.0,
+                false,
+              ],
+              startPct: 24,
+            },
+            {
+              baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
+              endpoint: '/generate',
+              payload: [wanPrompt, -1, 24, 25],
+              startPct: 28,
+            },
+            {
+              baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
+              endpoint: '/generate',
+              payload: ['wan-base', wanPrompt, wanNeg, w1W, w1H, 49, 18, 5, -1, 1, null],
+              startPct: 34,
+            },
+            {
+              baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
+              endpoint: '/generate_video',
+              payload: [
+                null,
+                null,
+                wanPrompt,
+                null,
+                'Text-to-Video',
+                false,
+                Math.floor(Math.random() * 2147483647),
+                true,
+                ltxH,
+                ltxW,
+                'No LoRA',
+                null,
+              ],
+              startPct: 40,
+            },
+            {
+              baseUrl: 'https://zai-org-cogvideox-2b-space.hf.space',
+              endpoint: '/generate',
+              payload: [wanPrompt, 35, 6],
+              startPct: 48,
+            },
+            {
+              baseUrl: 'https://zai-org-cogvideox-5b-space.hf.space',
+              endpoint: '/generate',
+              payload: [wanPrompt, null, null, 0.8, -1, false, false],
+              startPct: 56,
+            },
+          ];
+
+          void serverJobFinishedWithFailure;
+
+          for (const tier of browserVideoTiers) {
+            if (finalVideoUrl) break;
+            const res = await callWanSpaceAndMaster(
+              tier.baseUrl,
+              tier.endpoint,
+              tier.payload,
+              tier.startPct,
+              81
+            );
+            finalVideoUrl = res.url;
           }
         }
 
@@ -2101,17 +2256,48 @@ export default function App() {
     // Chat Mode: Chat with AI (always allowed, even after reaching 100k token limit)
     setThinkingLabel('Thinking...');
     try {
-      const payloadAttachments = currentAttachments.map((a) => ({
-        name: a.name,
-        mimeType: a.mimeType,
-        data: a.base64Data,
-      }));
+      const payloadAttachments: Array<{
+        name: string;
+        mimeType: string;
+        data: string;
+        kind?: string;
+        transcriptHint?: string;
+      }> = [];
+
+      for (const a of currentAttachments) {
+        if (a.type === 'video') {
+          if (a.frames && a.frames.length > 0) {
+            for (const frame of a.frames) {
+              payloadAttachments.push({
+                name: `${a.name} (${frame.timeSec.toFixed(1)}s)`,
+                kind: 'video-frame',
+                mimeType: frame.mimeType,
+                data: frame.data,
+              });
+            }
+          }
+          if (a.base64Data && a.base64Data.length < 3_600_000) {
+            payloadAttachments.push({
+              name: a.name,
+              mimeType: a.mimeType,
+              data: a.base64Data,
+            });
+          }
+        } else if (a.base64Data) {
+          payloadAttachments.push({
+            name: a.name,
+            mimeType: a.mimeType,
+            data: a.base64Data,
+          });
+        }
+      }
 
       if (currentVoice && currentVoice.base64Data) {
         payloadAttachments.push({
           name: 'voice-message.webm',
           mimeType: currentVoice.mimeType,
           data: currentVoice.base64Data,
+          ...(currentVoice.speechTranscript ? { transcriptHint: currentVoice.speechTranscript } : {}),
         });
       }
 

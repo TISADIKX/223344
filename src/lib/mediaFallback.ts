@@ -299,6 +299,36 @@ function acquireHordeSubmitSlot(minGapMs: number = 800): Promise<void> {
   );
 }
 
+async function resizeSourceBase64ForHorde(
+  sourceImageBase64: string,
+  targetW: number,
+  targetH: number
+): Promise<string> {
+  const cleanRaw = sourceImageBase64.includes(',')
+    ? sourceImageBase64.split(',')[1]
+    : sourceImageBase64;
+  try {
+    const dataUri = sourceImageBase64.startsWith('data:')
+      ? sourceImageBase64
+      : `data:image/jpeg;base64,${cleanRaw}`;
+    const img = await loadImageElement(dataUri);
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return cleanRaw;
+
+    const scale = Math.max(targetW / (img.naturalWidth || targetW), targetH / (img.naturalHeight || targetH));
+    const drawW = (img.naturalWidth || targetW) * scale;
+    const drawH = (img.naturalHeight || targetH) * scale;
+    ctx.drawImage(img, (targetW - drawW) / 2, (targetH - drawH) / 2, drawW, drawH);
+    const out = canvas.toDataURL('image/jpeg', 0.86);
+    return out.split(',')[1] || cleanRaw;
+  } catch {
+    return cleanRaw;
+  }
+}
+
 async function submitAiHordePhotoInBrowser(
   fullPrompt: string,
   aspectRatio: PhotoAspectRatio,
@@ -316,6 +346,10 @@ async function submitAiHordePhotoInBrowser(
       ? [448, 576]
       : [512, 512];
 
+  const preparedSourceB64 = sourceImageBase64
+    ? await resizeSourceBase64ForHorde(sourceImageBase64, hordeW, hordeH)
+    : undefined;
+
   const models = [
     'Deliberate',
     'Realistic Vision',
@@ -325,7 +359,7 @@ async function submitAiHordePhotoInBrowser(
     'stable_diffusion',
   ];
 
-  const submitJob = (w: number, h: number, steps: number, useModels: string[]) =>
+  const submitJob = (srcB64: string | undefined, w: number, h: number, steps: number, useModels: string[]) =>
     fetch('https://stablehorde.net/api/v2/generate/async', {
       method: 'POST',
       headers: {
@@ -335,11 +369,9 @@ async function submitAiHordePhotoInBrowser(
       },
       body: JSON.stringify({
         prompt: `${fullPrompt} ### cartoon, anime, illustration, cgi, 3d render, watermark, text, blurry, deformed`,
-        ...(sourceImageBase64
+        ...(srcB64
           ? {
-              source_image: sourceImageBase64.includes(',')
-                ? sourceImageBase64.split(',')[1]
-                : sourceImageBase64,
+              source_image: srcB64,
               source_processing: 'img2img',
             }
           : {}),
@@ -347,9 +379,9 @@ async function submitAiHordePhotoInBrowser(
           width: w,
           height: h,
           steps,
-          ...(sourceImageBase64 ? { denoising_strength: Number(denoisingStrength.toFixed(2)) } : {}),
+          ...(srcB64 ? { denoising_strength: Number(denoisingStrength.toFixed(2)) } : {}),
           n: 1,
-          cfg_scale: sourceImageBase64 ? 7.5 : 7,
+          cfg_scale: srcB64 ? 7.5 : 7,
           sampler_name: 'k_euler',
         },
         models: useModels,
@@ -364,13 +396,16 @@ async function submitAiHordePhotoInBrowser(
     let res: Response | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       await acquireHordeSubmitSlot(attempt === 0 ? 750 : 1400);
-      res = await submitJob(hordeW, hordeH, 16, models);
+      res = await submitJob(preparedSourceB64, hordeW, hordeH, 16, models);
       if (res.status === 429 || res.status === 503) {
         await new Promise((r) => setTimeout(r, 1300));
         continue;
       }
       if (res.status === 403 || res.status === 400) {
-        res = await submitJob(512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
+        const squareSrc = sourceImageBase64
+          ? await resizeSourceBase64ForHorde(sourceImageBase64, 512, 512)
+          : undefined;
+        res = await submitJob(squareSrc, 512, 512, 12, ['Deliberate', 'Realistic Vision', 'stable_diffusion']);
       }
       break;
     }
