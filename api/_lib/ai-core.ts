@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { InferenceClient } from '@huggingface/inference';
 
 // ============================================================================
 // Environment & Exact Model Configuration (All models preserved verbatim)
@@ -2005,81 +2006,54 @@ export interface WanSpaceTierSpec {
   buildPayload: (wanPrompt: string, aspectRatio: VideoAspectOption) => unknown[];
 }
 
+export async function generateViaHfInferenceRouterVideo(
+  wanPrompt: string
+): Promise<{ buffer: Buffer; model: string } | null> {
+  const token = getHfAccessToken();
+  if (!token) return null;
+
+  const client = new InferenceClient(token);
+  const attempts: Array<{ model: string; provider: 'fal-ai' | 'wavespeed' }> = [
+    { model: WAN22_14B_T2V_MODEL, provider: 'fal-ai' },
+    { model: WAN22_14B_T2V_MODEL, provider: 'wavespeed' },
+    { model: WAN21_14B_RCM_T2V_MODEL, provider: 'fal-ai' },
+    { model: WAN21_BASE_T2V_MODEL, provider: 'fal-ai' },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const blob = await client.textToVideo(
+        {
+          model: attempt.model,
+          inputs: wanPrompt,
+          provider: attempt.provider,
+          parameters: {
+            negative_prompt: WAN_NEGATIVE_PROMPT,
+            num_inference_steps: 20,
+            guidance_scale: 5,
+          },
+        } as any,
+        { signal: AbortSignal.timeout(35000) }
+      );
+      if (blob && blob.size > 8000) {
+        const buffer = Buffer.from(await blob.arrayBuffer());
+        if (buffer.length > 8000) {
+          return { buffer, model: attempt.model };
+        }
+      }
+    } catch {
+      // Try next inference provider
+    }
+  }
+  return null;
+}
+
 export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
-  {
-    model: WAN22_14B_T2V_MODEL,
-    baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
-    endpoint: '/generate_video',
-    startPct: 10,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
-      const aspectChoice =
-        aspectRatio === '9:16'
-          ? '9:16 (480x832)'
-          : aspectRatio === '1:1'
-          ? '1:1 (640x640)'
-          : '16:9 (832x480)';
-      return [
-        wanPrompt,
-        aspectChoice,
-        4,
-        WAN_NEGATIVE_PROMPT,
-        4.2,
-        1,
-        1,
-        Math.floor(Math.random() * 2147483647),
-        true,
-      ];
-    },
-  },
-  {
-    model: WAN22_5B_T2V_MODEL,
-    baseUrl: 'https://upsampler-wan-2-2-5b-video.hf.space',
-    endpoint: '/generate_video',
-    startPct: 14,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
-      const [wanH, wanW] =
-        aspectRatio === '9:16'
-          ? [832, 480]
-          : aspectRatio === '1:1'
-          ? [640, 640]
-          : [480, 832];
-      return [
-        null,
-        wanPrompt,
-        wanH,
-        wanW,
-        WAN_NEGATIVE_PROMPT,
-        5.0,
-        0,
-        4,
-        Math.floor(Math.random() * 2147483647),
-        true,
-      ];
-    },
-  },
-  {
-    model: WAN21_14B_RCM_T2V_MODEL,
-    baseUrl: 'https://yujiwang0606-rcm-wan.hf.space',
-    endpoint: '/generate_videos',
-    startPct: 18,
-    endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => [
-      wanPrompt,
-      'rCM-Wan2.1-T2V-14B-480p',
-      1,
-      aspectRatio === '9:16' ? '9:16' : '16:9',
-      80,
-      4,
-      Math.floor(Math.random() * 900000000) + 1,
-    ],
-  },
   {
     model: WAN21_BASE_T2V_MODEL,
     baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
     endpoint: '/generate',
-    startPct: 20,
+    startPct: 10,
     endPct: 92,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [wanW, wanH] =
@@ -2102,6 +2076,160 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         null,
       ];
     },
+  },
+  {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://prithivmlmods-wan2-2-fast.hf.space',
+    endpoint: '/generate_video',
+    startPct: 14,
+    endPct: 92,
+    buildPayload: (wanPrompt) => [
+      null,
+      wanPrompt,
+      4,
+      WAN_NEGATIVE_PROMPT,
+      4.0,
+      1,
+      1,
+      Math.floor(Math.random() * 2147483647),
+      true,
+    ],
+  },
+  {
+    model: 'Lightricks/LTX-Video-Distilled',
+    baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
+    endpoint: '/text_to_video',
+    startPct: 16,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [704, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 704];
+      return [
+        wanPrompt,
+        'worst quality, inconsistent motion, blurry, jittery, distorted',
+        null,
+        null,
+        ltxH,
+        ltxW,
+        'text-to-video',
+        3,
+        9,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        1,
+        true,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.5',
+    baseUrl: 'https://upsampler-ltx-2-5.hf.space',
+    endpoint: '/generate_video',
+    startPct: 18,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        wanPrompt,
+        null,
+        ltxH,
+        ltxW,
+        3,
+        Math.floor(Math.random() * 2147483647),
+        'conv',
+        false,
+        true,
+        false,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.3',
+    baseUrl: 'https://lightricks-ltx-2-3.hf.space',
+    endpoint: '/generate_video',
+    startPct: 20,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        null,
+        wanPrompt,
+        3,
+        false,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        ltxH,
+        ltxW,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2-Turbo',
+    baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
+    endpoint: '/generate_video',
+    startPct: 22,
+    endPct: 92,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        null,
+        null,
+        wanPrompt,
+        null,
+        'Text-to-Video',
+        false,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        ltxH,
+        ltxW,
+        'No LoRA',
+        null,
+      ];
+    },
+  },
+  {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://prashant-ai-ml-wan-2-2-pro-superb.hf.space',
+    endpoint: '/generate_video',
+    startPct: 24,
+    endPct: 92,
+    buildPayload: (wanPrompt) => [
+      null,
+      null,
+      wanPrompt,
+      4,
+      WAN_NEGATIVE_PROMPT,
+      4.0,
+      1,
+      1,
+      Math.floor(Math.random() * 2147483647),
+      true,
+      6,
+      'UniPCMultistep',
+      3,
+      16,
+      true,
+      true,
+    ],
   },
 ];
 
@@ -2167,7 +2295,7 @@ export async function submitWanSpaceTier(
 
   const token = getHfAccessToken();
   const authHeaders: Record<string, string> = token
-    ? { Authorization: `Bearer ${token}` }
+    ? { Authorization: `Bearer ${token}`, 'X-HF-Token': token }
     : {};
   const wanPrompt = buildWanTextToVideoPrompt(cleanPrompt, aspectRatio);
 
@@ -2194,23 +2322,6 @@ export async function submitWanSpaceTier(
   } catch {
     return { eventId: null, quotaExceeded: false };
   }
-}
-
-export async function planVideoStoryboardFrames(
-  rawPrompt: string,
-  frameCount: number
-): Promise<string[]> {
-  const cleanSubject = rawPrompt.trim().slice(0, 500);
-  return frameCount <= 2
-    ? [
-        `Cinematic 35mm establishing wide shot of ${cleanSubject}, dramatic natural lighting, crisp depth of field, authentic live-action photography`,
-        `Cinematic 35mm dynamic close-up continuation of ${cleanSubject} in motion, warm golden rim lighting, rich textures, authentic live-action photography`,
-      ]
-    : [
-        `Cinematic 35mm opening wide shot of ${cleanSubject}, atmospheric natural lighting, authentic live-action photography`,
-        `Cinematic 35mm mid-action dynamic tracking shot of ${cleanSubject}, vivid natural motion, crisp optical focus, authentic live-action photography`,
-        `Cinematic 35mm golden atmospheric closing shot of ${cleanSubject}, dramatic light rays and natural depth, authentic live-action photography`,
-      ];
 }
 
 export async function startStatelessVideoJob(body: any): Promise<{ status: number; body: any }> {
@@ -2253,11 +2364,29 @@ export async function startStatelessVideoJob(body: any): Promise<{ status: numbe
     }
   }
 
+  const infVideo = await generateViaHfInferenceRouterVideo(
+    buildWanTextToVideoPrompt(cleanPrompt, aspectRatio)
+  );
+  if (infVideo && infVideo.buffer.length <= 4 * 1024 * 1024) {
+    return {
+      status: 200,
+      body: {
+        status: 'completed',
+        progress: 100,
+        videoUrl: `data:video/mp4;base64,${infVideo.buffer.toString('base64')}`,
+        prompt: cleanPrompt,
+        duration,
+        aspectRatio,
+        quality,
+        model: infVideo.model,
+      },
+    };
+  }
+
   return {
     status: 503,
     body: {
       status: 'failed',
-      needsStoryboardFallback: true,
       error: 'Video generation servers are currently busy. Please try again in a moment.',
     },
   };
@@ -2274,7 +2403,6 @@ export async function pollStatelessVideoJob(
       body: {
         jobId: encodeStatelessVideoJob(state),
         status: 'failed',
-        needsStoryboardFallback: true,
         error: 'Video generation servers are currently busy. Please try again in a moment.',
       },
     };
@@ -2282,7 +2410,7 @@ export async function pollStatelessVideoJob(
 
   const token = getHfAccessToken();
   const authHeaders: Record<string, string> = token
-    ? { Authorization: `Bearer ${token}` }
+    ? { Authorization: `Bearer ${token}`, 'X-HF-Token': token }
     : {};
 
   let lastProgress = Math.max(8, Math.min(95, state.pr || 10));
@@ -2400,12 +2528,32 @@ export async function pollStatelessVideoJob(
     }
   }
 
+  // Final serverless real-video fallback via Hugging Face Inference Providers (fal-ai / wavespeed)
+  const infVideo = await generateViaHfInferenceRouterVideo(
+    buildWanTextToVideoPrompt(state.p, state.a)
+  );
+  if (infVideo && infVideo.buffer.length <= 4 * 1024 * 1024) {
+    return {
+      status: 200,
+      body: {
+        jobId: encodeStatelessVideoJob(state),
+        status: 'completed',
+        progress: 100,
+        videoUrl: `data:video/mp4;base64,${infVideo.buffer.toString('base64')}`,
+        prompt: state.p,
+        duration: state.d,
+        aspectRatio: state.a,
+        quality: state.q,
+        model: infVideo.model,
+      },
+    };
+  }
+
   return {
     status: 200,
     body: {
       jobId: encodeStatelessVideoJob(state),
       status: 'failed',
-      needsStoryboardFallback: true,
       progress: 0,
       error: 'Video generation servers are currently busy. Please try again in a moment.',
     },

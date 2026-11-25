@@ -6,6 +6,7 @@
       "name": "react-example",
       "dependencies": {
         "@google/genai": "^2.4.0",
+        "@huggingface/inference": "^4.13.33",
         "@tailwindcss/vite": "^4.3.3",
         "@vitejs/plugin-react": "^6.1.1",
         "dotenv": "^17.2.3",
@@ -201,6 +202,12 @@
     "@grpc/grpc-js": ["@grpc/grpc-js@1.9.16", "", { "dependencies": { "@grpc/proto-loader": "^0.7.8", "@types/node": ">=12.12.47" } }, "sha512-wE4Ut/olIzfKqp631XrG+wbF0v1vWFN4YL9FyXC2LJiG33DsV7PLzURjrCvY/6je2ntdRkeLpPDluzSRGaVltQ=="],
 
     "@grpc/proto-loader": ["@grpc/proto-loader@0.7.15", "", { "dependencies": { "lodash.camelcase": "^4.3.0", "long": "^5.0.0", "protobufjs": "^7.2.5", "yargs": "^17.7.2" }, "bin": { "proto-loader-gen-types": "build/bin/proto-loader-gen-types.js" } }, "sha512-tMXdRCfYVixjuFK+Hk0Q1s38gV9zDiDJfWL3h1rv4Qc39oILCu1TRTDt7+fGUI8K4G1Fj125Hx/ru3azECWTyQ=="],
+
+    "@huggingface/inference": ["@huggingface/inference@4.13.33", "", { "dependencies": { "@huggingface/jinja": "^0.5.13", "@huggingface/tasks": "^0.22.13" } }, "sha512-2BvmSaCNOO5tkJ+OD6KICSfhNE2qliU5pTwme+VMGAlC/y0jFQnmUuY1ZVSIgEzUitYWyQF62F02PioupNwphg=="],
+
+    "@huggingface/jinja": ["@huggingface/jinja@0.5.13", "", {}, "sha512-jM17MqFily1iyT/1LD3r5w8/CZiyapVB0+7vOw48PfVtzyKsXStmHE4jVTyDAD05Tqv3un1xrS9ILUU1ugQAYQ=="],
+
+    "@huggingface/tasks": ["@huggingface/tasks@0.22.26", "", {}, "sha512-UFmXqKtbQ95eIlOTGUikgS8OjNQqdsqZElkXI56nuJVN0KMtCfPdy11JRXTYpdjb9fyXAvQSfe/RtcKl8XGR4A=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.2", "", { "dependencies": { "@humanfs/types": "^0.15.0" } }, "sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA=="],
 

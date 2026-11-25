@@ -37,7 +37,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       },
       video: {
         status: 'healthy',
-        providers: ['Wan 2.2 14B', 'Wan 2.2 5B', 'Wan 2.1 14B', 'Wan 2.1 1.3B'],
+        providers: ['Wan 2.2', 'Wan 2.1', 'LTX-Video', 'LTX-2.5'],
       },
       database: {
         status: 'connected',

@@ -8,6 +8,7 @@ import { exec, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import { InferenceClient } from '@huggingface/inference';
 
 dotenv.config();
 
@@ -2339,507 +2340,322 @@ async function readGradioSseWithProgress(
   return { sseText: fullText, quotaExceeded: false };
 }
 
-// Tier 1 (Primary): Wan-AI/Wan2.2-T2V-A14B (Wan 2.2 14B MoE Text-to-Video, 68 native frames @ 16fps)
-async function generateViaWan22A14BT2V(
-  wanPrompt: string,
-  targetSeconds: 5 | 10,
-  aspectRatio: VideoAspectOption,
-  quality: VideoQualityOption,
-  onProgress?: (pct: number) => void
-): Promise<{ url: string | null; quotaExceeded: boolean }> {
-  const baseUrl = 'https://upsampler-wan-2-2-14b-text-to-video.hf.space';
-  const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
-    ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}` }
-    : {};
-  const aspectChoice =
-    aspectRatio === '9:16'
-      ? '9:16 (480x832)'
-      : aspectRatio === '1:1'
-      ? '1:1 (640x640)'
-      : '16:9 (832x480)';
-
-  try {
-    const postRes = await fetch(`${baseUrl}/gradio_api/call/generate_video`, {
-      method: 'POST',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [
-          wanPrompt,
-          aspectChoice,
-          4,
-          WAN_NEGATIVE_PROMPT,
-          4.2,
-          1,
-          1,
-          Math.floor(Math.random() * 2147483647),
-          true,
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!postRes.ok) return { url: null, quotaExceeded: false };
-
-    const postJson: any = await postRes.json();
-    const eventId = postJson?.event_id;
-    if (!eventId) return { url: null, quotaExceeded: false };
-
-    const { sseText, quotaExceeded } = await readGradioSseWithProgress(
-      `${baseUrl}/gradio_api/call/generate_video/${eventId}`,
-      authHeaders,
-      95000,
-      10,
-      80,
-      onProgress
-    );
-    if (!sseText) return { url: null, quotaExceeded };
-
-    const rawUrl = extractGradioVideoUrl(sseText, baseUrl);
-    if (rawUrl) {
-      const mastered = await fetchAndMasterWanClip(
-        rawUrl,
-        authHeaders,
-        targetSeconds,
-        aspectRatio,
-        quality,
-        onProgress
-      );
-      return { url: mastered, quotaExceeded: false };
-    }
-  } catch (err: any) {
-    console.warn(`Wan Tier 1 (${WAN22_14B_T2V_MODEL}) attempt:`, err?.message || err);
-  }
-
-  return { url: null, quotaExceeded: false };
+interface LiveVideoSpaceTier {
+  model: string;
+  baseUrl: string;
+  endpoint: string;
+  timeoutMs: number;
+  startPct: number;
+  endPct: number;
+  buildPayload: (wanPrompt: string, aspectRatio: VideoAspectOption) => unknown[];
 }
 
-// Tier 2: Wan-AI/Wan2.2-TI2V-5B (Native 24fps 5.0s = 120 native frames @ 832x480 / 480x832 / 640x640)
-async function generateViaWan225BHdT2V(
-  wanPrompt: string,
-  targetSeconds: 5 | 10,
-  aspectRatio: VideoAspectOption,
-  quality: VideoQualityOption,
-  onProgress?: (pct: number) => void
-): Promise<{ url: string | null; quotaExceeded: boolean }> {
-  const baseUrl = 'https://upsampler-wan-2-2-5b-video.hf.space';
-  const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
-    ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}` }
-    : {};
-  const [wanH, wanW] =
-    aspectRatio === '9:16'
-      ? [832, 480]
-      : aspectRatio === '1:1'
-      ? [640, 640]
-      : [480, 832];
-
-  try {
-    const postRes = await fetch(`${baseUrl}/gradio_api/call/generate_video`, {
-      method: 'POST',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [
-          null,
-          wanPrompt,
-          wanH,
-          wanW,
-          WAN_NEGATIVE_PROMPT,
-          5.0,
-          0,
-          4,
-          Math.floor(Math.random() * 2147483647),
-          true,
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!postRes.ok) return { url: null, quotaExceeded: false };
-
-    const postJson: any = await postRes.json();
-    const eventId = postJson?.event_id;
-    if (!eventId) return { url: null, quotaExceeded: false };
-
-    const { sseText, quotaExceeded } = await readGradioSseWithProgress(
-      `${baseUrl}/gradio_api/call/generate_video/${eventId}`,
-      authHeaders,
-      95000,
-      14,
-      80,
-      onProgress
-    );
-    if (!sseText) return { url: null, quotaExceeded };
-
-    const rawUrl = extractGradioVideoUrl(sseText, baseUrl);
-    if (rawUrl) {
-      const mastered = await fetchAndMasterWanClip(
-        rawUrl,
-        authHeaders,
-        targetSeconds,
-        aspectRatio,
-        quality,
-        onProgress
-      );
-      return { url: mastered, quotaExceeded: false };
-    }
-  } catch (err: any) {
-    console.warn(`Wan Tier 2 (${WAN22_5B_T2V_MODEL}) attempt:`, err?.message || err);
-  }
-
-  return { url: null, quotaExceeded: false };
-}
-
-// Tier 3: Wan-AI/Wan2.1-T2V-14B (4-step rCM-distilled 14B Wan 2.1 Text-to-Video, 77 native frames @ 16fps)
-async function generateViaWan21Rcm14BT2V(
-  wanPrompt: string,
-  targetSeconds: 5 | 10,
-  aspectRatio: VideoAspectOption,
-  quality: VideoQualityOption,
-  onProgress?: (pct: number) => void
-): Promise<string | null> {
-  const baseUrl = 'https://yujiwang0606-rcm-wan.hf.space';
-  const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
-    ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}` }
-    : {};
-  const rcmAspect = aspectRatio === '9:16' ? '9:16' : '16:9';
-
-  try {
-    const postRes = await fetch(`${baseUrl}/gradio_api/call/generate_videos`, {
-      method: 'POST',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [
-          wanPrompt,
-          'rCM-Wan2.1-T2V-14B-480p',
-          1,
-          rcmAspect,
-          80,
-          4,
-          Math.floor(Math.random() * 900000000) + 1,
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!postRes.ok) return null;
-
-    const postJson: any = await postRes.json();
-    const eventId = postJson?.event_id;
-    if (!eventId) return null;
-
-    const { sseText } = await readGradioSseWithProgress(
-      `${baseUrl}/gradio_api/call/generate_videos/${eventId}`,
-      authHeaders,
-      95000,
-      18,
-      80,
-      onProgress
-    );
-    if (!sseText) return null;
-
-    const rawUrl = extractGradioVideoUrl(sseText, baseUrl);
-    if (rawUrl) {
-      return await fetchAndMasterWanClip(
-        rawUrl,
-        authHeaders,
-        targetSeconds,
-        aspectRatio,
-        quality,
-        onProgress
-      );
-    }
-  } catch (err: any) {
-    console.warn(`Wan Tier 3 (${WAN21_14B_RCM_T2V_MODEL}) attempt:`, err?.message || err);
-  }
-
-  return null;
-}
-
-// Tier 4: Wan-AI/Wan2.1-T2V-1.3B Base (Official Wan 2.1 Text-to-Video, 49 native frames @ 16fps)
-async function generateViaWan21BaseT2V(
-  wanPrompt: string,
-  targetSeconds: 5 | 10,
-  aspectRatio: VideoAspectOption,
-  quality: VideoQualityOption,
-  onProgress?: (pct: number) => void
-): Promise<string | null> {
-  const baseUrl = 'https://numanajmal0-wan-video-api.hf.space';
-  const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
-    ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}` }
-    : {};
-  const [wanW, wanH] =
-    aspectRatio === '9:16'
-      ? [480, 832]
-      : aspectRatio === '1:1'
-      ? [640, 640]
-      : [832, 480];
-
-  try {
-    const postRes = await fetch(`${baseUrl}/gradio_api/call/generate`, {
-      method: 'POST',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [
-          'wan-base',
-          wanPrompt,
-          WAN_NEGATIVE_PROMPT,
-          wanW,
-          wanH,
-          49,
-          18,
-          5,
-          -1,
-          1,
-          null,
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!postRes.ok) return null;
-
-    const postJson: any = await postRes.json();
-    const eventId = postJson?.event_id;
-    if (!eventId) return null;
-
-    const { sseText } = await readGradioSseWithProgress(
-      `${baseUrl}/gradio_api/call/generate/${eventId}`,
-      authHeaders,
-      50000,
-      20,
-      80,
-      onProgress
-    );
-    if (!sseText) return null;
-
-    const rawUrl = extractGradioVideoUrl(sseText, baseUrl);
-    if (rawUrl) {
-      return await fetchAndMasterWanClip(
-        rawUrl,
-        authHeaders,
-        targetSeconds,
-        aspectRatio,
-        quality,
-        onProgress
-      );
-    }
-  } catch (err: any) {
-    console.warn(`Wan Tier 4 (${WAN21_BASE_T2V_MODEL}) attempt:`, err?.message || err);
-  }
-
-  return null;
-}
-
-// Plan 2-3 cohesive temporal camera keyframes for reliable cinematic MP4 fallback synthesis (SenseNova reserved strictly for chat/photo)
-async function planVideoStoryboardFrames(
-  rawPrompt: string,
-  frameCount: number
-): Promise<string[]> {
-  const cleanSubject = rawPrompt.trim().slice(0, 500);
-  return frameCount <= 2
-    ? [
-        `Cinematic 35mm establishing wide shot of ${cleanSubject}, dramatic natural lighting, crisp depth of field, authentic live-action photography`,
-        `Cinematic 35mm dynamic close-up continuation of ${cleanSubject} in motion, warm golden rim lighting, rich textures, authentic live-action photography`,
-      ]
-    : [
-        `Cinematic 35mm opening wide shot of ${cleanSubject}, atmospheric natural lighting, authentic live-action photography`,
-        `Cinematic 35mm mid-action dynamic tracking shot of ${cleanSubject}, vivid natural motion, crisp optical focus, authentic live-action photography`,
-        `Cinematic 35mm golden atmospheric closing shot of ${cleanSubject}, dramatic light rays and natural depth, authentic live-action photography`,
+const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
+  {
+    model: WAN21_BASE_T2V_MODEL,
+    baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
+    endpoint: '/generate',
+    timeoutMs: 55000,
+    startPct: 10,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [wanW, wanH] =
+        aspectRatio === '9:16'
+          ? [480, 832]
+          : aspectRatio === '1:1'
+          ? [640, 640]
+          : [832, 480];
+      return [
+        'wan-base',
+        wanPrompt,
+        WAN_NEGATIVE_PROMPT,
+        wanW,
+        wanH,
+        49,
+        18,
+        5,
+        -1,
+        1,
+        null,
       ];
-}
+    },
+  },
+  {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://prithivmlmods-wan2-2-fast.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 85000,
+    startPct: 14,
+    endPct: 80,
+    buildPayload: (wanPrompt) => [
+      null,
+      wanPrompt,
+      4,
+      WAN_NEGATIVE_PROMPT,
+      4.0,
+      1,
+      1,
+      Math.floor(Math.random() * 2147483647),
+      true,
+    ],
+  },
+  {
+    model: 'Lightricks/LTX-Video-Distilled',
+    baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
+    endpoint: '/text_to_video',
+    timeoutMs: 75000,
+    startPct: 18,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [704, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 704];
+      return [
+        wanPrompt,
+        'worst quality, inconsistent motion, blurry, jittery, distorted',
+        null,
+        null,
+        ltxH,
+        ltxW,
+        'text-to-video',
+        3,
+        9,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        1,
+        true,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.5',
+    baseUrl: 'https://upsampler-ltx-2-5.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 85000,
+    startPct: 22,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        wanPrompt,
+        null,
+        ltxH,
+        ltxW,
+        3,
+        Math.floor(Math.random() * 2147483647),
+        'conv',
+        false,
+        true,
+        false,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2.3',
+    baseUrl: 'https://lightricks-ltx-2-3.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 85000,
+    startPct: 26,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        null,
+        wanPrompt,
+        3,
+        false,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        ltxH,
+        ltxW,
+      ];
+    },
+  },
+  {
+    model: 'Lightricks/LTX-2-Turbo',
+    baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 85000,
+    startPct: 30,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [ltxH, ltxW] =
+        aspectRatio === '9:16'
+          ? [768, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 768];
+      return [
+        null,
+        null,
+        wanPrompt,
+        null,
+        'Text-to-Video',
+        false,
+        Math.floor(Math.random() * 2147483647),
+        true,
+        ltxH,
+        ltxW,
+        'No LoRA',
+        null,
+      ];
+    },
+  },
+  {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://prashant-ai-ml-wan-2-2-pro-superb.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 85000,
+    startPct: 34,
+    endPct: 80,
+    buildPayload: (wanPrompt) => [
+      null,
+      null,
+      wanPrompt,
+      4,
+      WAN_NEGATIVE_PROMPT,
+      4.0,
+      1,
+      1,
+      Math.floor(Math.random() * 2147483647),
+      true,
+      6,
+      'UniPCMultistep',
+      3,
+      16,
+      true,
+      true,
+    ],
+  },
+];
 
-// Fast jitter-free 30fps FFmpeg cinematic motion compositing (oversampled smooth zoom/pan + crossfade)
-async function composeCinematicMp4FromKeyframes(
-  frameBuffers: Buffer[],
+async function generateViaLiveSpaceTier(
+  tier: LiveVideoSpaceTier,
+  wanPrompt: string,
   targetSeconds: 5 | 10,
   aspectRatio: VideoAspectOption,
   quality: VideoQualityOption,
   onProgress?: (pct: number) => void
 ): Promise<string | null> {
-  if (frameBuffers.length === 0) return null;
-
-  const fileId = `vid_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-  const tempPaths: string[] = [];
-  const finalOutPath = path.join(GENERATED_VIDEOS_DIR, `${fileId}.mp4`);
-
-  const targetFps = 30;
-  const { outW, outH, crf, maxrate, bufsize } = getVideoResolutionConfig(
-    aspectRatio,
-    quality,
-    targetSeconds
-  );
-  // 2x oversampling eliminates zoompan subpixel shimmer cleanly while keeping encoding fast
-  const osW = Math.min(2560, outW * 2);
-  const osH = Math.min(2560, outH * 2);
+  const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
+    ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}`, 'X-HF-Token': HF_ACCESS_TOKEN }
+    : {};
 
   try {
-    const framesToUse =
-      frameBuffers.length >= 2 ? frameBuffers.slice(0, 3) : [frameBuffers[0], frameBuffers[0]];
-
-    for (let i = 0; i < framesToUse.length; i++) {
-      const p = path.join(os.tmpdir(), `${fileId}_kf_${i}.jpg`);
-      await fs.promises.writeFile(p, framesToUse[i]);
-      tempPaths.push(p);
-    }
-
-    const n = framesToUse.length;
-    const xfadeDur = 0.65;
-    // Ensure total output duration equals targetSeconds cleanly after xfade overlaps
-    const clipSec = (targetSeconds + xfadeDur * (n - 1)) / n;
-    const segFrames = Math.max(30, Math.round(clipSec * targetFps));
-
-    const inputArgs: string[] = [];
-    for (const p of tempPaths) {
-      inputArgs.push('-i', p);
-    }
-
-    const filterParts: string[] = [];
-    for (let i = 0; i < n; i++) {
-      const prep = `[${i}:v]scale=${osW}:${osH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${osW}:${osH},setsar=1`;
-      let motion = '';
-      if (i % 3 === 0) {
-        // Smooth push-in
-        motion = `zoompan=z='1+0.12*(on/${segFrames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${segFrames}:s=${outW}x${outH}:fps=${targetFps}`;
-      } else if (i % 3 === 1) {
-        // Smooth horizontal camera pan
-        motion = `zoompan=z='1.12':x='(iw-iw/zoom)*(on/${segFrames})':y='ih/2-(ih/zoom/2)':d=${segFrames}:s=${outW}x${outH}:fps=${targetFps}`;
-      } else {
-        // Smooth pull-out
-        motion = `zoompan=z='1.12-0.12*(on/${segFrames})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${segFrames}:s=${outW}x${outH}:fps=${targetFps}`;
-      }
-      filterParts.push(`${prep},${motion},setpts=PTS-STARTPTS,format=yuv420p[v${i}]`);
-    }
-
-    let finalLabel = '[v0]';
-    if (n === 2) {
-      const offset1 = Math.max(0.5, clipSec - xfadeDur).toFixed(3);
-      filterParts.push(
-        `[v0][v1]xfade=transition=fade:duration=${xfadeDur}:offset=${offset1},unsharp=5:5:0.24:5:5:0.0,format=yuv420p[vout]`
-      );
-      finalLabel = '[vout]';
-    } else if (n >= 3) {
-      const offset1 = Math.max(0.5, clipSec - xfadeDur).toFixed(3);
-      const offset2 = Math.max(1.0, clipSec * 2 - xfadeDur * 2).toFixed(3);
-      filterParts.push(
-        `[v0][v1]xfade=transition=fade:duration=${xfadeDur}:offset=${offset1}[vx1]`,
-        `[vx1][v2]xfade=transition=smoothleft:duration=${xfadeDur}:offset=${offset2},unsharp=5:5:0.24:5:5:0.0,format=yuv420p[vout]`
-      );
-      finalLabel = '[vout]';
-    }
-
-    const totalTargetFrames = Math.round(targetSeconds * targetFps);
-    const args = [
-      '-y',
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-threads',
-      '0',
-      ...inputArgs,
-      '-filter_complex',
-      filterParts.join(';'),
-      '-map',
-      finalLabel,
-      '-an',
-      '-r',
-      String(targetFps),
-      '-t',
-      String(targetSeconds),
-      '-c:v',
-      'libx264',
-      '-profile:v',
-      'high',
-      '-level',
-      '4.1',
-      '-preset',
-      'veryfast',
-      '-tune',
-      'film',
-      '-crf',
-      String(crf),
-      '-maxrate',
-      maxrate,
-      '-bufsize',
-      bufsize,
-      '-g',
-      '30',
-      '-pix_fmt',
-      'yuv420p',
-      '-movflags',
-      '+faststart',
-      '-progress',
-      'pipe:1',
-      '-nostats',
-      finalOutPath,
-    ];
-
-    onProgress?.(78);
-    await runFfmpegWithProgress(args, totalTargetFrames, 65000, (ratio) => {
-      onProgress?.(Math.min(99, Math.round(78 + ratio * 21)));
+    const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio) }),
+      signal: AbortSignal.timeout(14000),
     });
+    if (!postRes.ok) return null;
 
-    const stat = await fs.promises.stat(finalOutPath);
-    if (stat.size > 10000) {
-      onProgress?.(100);
-      return `/api/videos/${fileId}.mp4`;
+    const postJson: any = await postRes.json();
+    const eventId = postJson?.event_id;
+    if (!eventId) return null;
+
+    const { sseText } = await readGradioSseWithProgress(
+      `${tier.baseUrl}/gradio_api/call${tier.endpoint}/${eventId}`,
+      authHeaders,
+      tier.timeoutMs,
+      tier.startPct,
+      tier.endPct,
+      onProgress
+    );
+    if (!sseText) return null;
+
+    const rawUrl = extractGradioVideoUrl(sseText, tier.baseUrl);
+    if (rawUrl) {
+      return await fetchAndMasterWanClip(
+        rawUrl,
+        authHeaders,
+        targetSeconds,
+        aspectRatio,
+        quality,
+        onProgress
+      );
     }
   } catch (err: any) {
-    console.warn('Cinematic storyboard FFmpeg synthesis error:', err?.message || err);
-  } finally {
-    for (const p of tempPaths) {
-      fs.promises.unlink(p).catch(() => {});
-    }
+    console.warn(`Video Space (${tier.baseUrl}) attempt:`, err?.message || err);
   }
-
   return null;
 }
 
-// Reliable Failover (when remote ZeroGPU video Spaces exhaust daily IP quota):
-// Xkiro SenseNova Storyboard + parallel keyframe synthesis + 30fps smooth motion mastering
-async function generateCinematicStoryboardVideoFallback(
-  rawPrompt: string,
+async function generateViaHfInferenceRouterVideo(
+  wanPrompt: string,
   targetSeconds: 5 | 10,
   aspectRatio: VideoAspectOption,
   quality: VideoQualityOption,
   onProgress?: (pct: number) => void
-): Promise<string | null> {
-  try {
-    onProgress?.(18);
-    const frameCount = targetSeconds === 5 ? 2 : 3;
-    const scenePrompts = await planVideoStoryboardFrames(rawPrompt, frameCount);
-    onProgress?.(28);
+): Promise<{ url: string; model: string } | null> {
+  if (!HF_ACCESS_TOKEN) return null;
 
-    const photoAspect: PhotoAspectOption = aspectRatio;
-    const photoQuality: PhotoQualityOption = quality === '1080p' ? 'hd' : 'standard';
+  const client = new InferenceClient(HF_ACCESS_TOKEN);
+  const attempts: Array<{ model: string; provider: 'fal-ai' | 'wavespeed' }> = [
+    { model: WAN22_14B_T2V_MODEL, provider: 'fal-ai' },
+    { model: WAN22_14B_T2V_MODEL, provider: 'wavespeed' },
+    { model: WAN21_14B_RCM_T2V_MODEL, provider: 'fal-ai' },
+    { model: WAN21_BASE_T2V_MODEL, provider: 'fal-ai' },
+  ];
 
-    let completedCount = 0;
-    const frameResults = await Promise.all(
-      scenePrompts.map(async (scenePrompt) => {
-        const rendered = await generateReliablePhoto(scenePrompt, photoAspect, photoQuality);
-        completedCount += 1;
-        onProgress?.(Math.min(72, Math.round(28 + (completedCount / scenePrompts.length) * 44)));
-        return rendered?.buffer || null;
-      })
-    );
-
-    const validFrames = frameResults.filter((b): b is Buffer => Boolean(b && b.length > 5000));
-    if (validFrames.length === 0) return null;
-
-    return await composeCinematicMp4FromKeyframes(
-      validFrames,
-      targetSeconds,
-      aspectRatio,
-      quality,
-      onProgress
-    );
-  } catch (err: any) {
-    console.warn('Storyboard video fallback error:', err?.message || err);
-    return null;
+  for (const attempt of attempts) {
+    try {
+      onProgress?.(20);
+      const blob = await client.textToVideo(
+        {
+          model: attempt.model,
+          inputs: wanPrompt,
+          provider: attempt.provider,
+          parameters: {
+            negative_prompt: WAN_NEGATIVE_PROMPT,
+            num_inference_steps: 20,
+            guidance_scale: 5,
+          },
+        } as any,
+        { signal: AbortSignal.timeout(90000) }
+      );
+      if (blob && blob.size > 8000) {
+        const buffer = Buffer.from(await blob.arrayBuffer());
+        if (buffer.length > 8000) {
+          onProgress?.(82);
+          const mastered = await masterWanVideoSmooth(
+            buffer,
+            targetSeconds,
+            aspectRatio,
+            quality,
+            onProgress
+          );
+          if (mastered) {
+            return { url: mastered, model: attempt.model };
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn(`HF Router (${attempt.provider}/${attempt.model}) attempt:`, err?.message || err);
+    }
   }
+  return null;
 }
 
-// Background worker executing the Wan Text-to-Video pipeline with continuous smooth progress
+// Background worker executing real AI Text-to-Video generation (no fake photo-zoom fallback)
 async function executeVideoJobInBackground(job: VideoJobState): Promise<void> {
   const updateProgress = (pct: number) => {
     job.progress = Math.max(job.progress, Math.min(99, Math.round(pct)));
   };
 
-  // Continuous adaptive progress heartbeat during GPU synthesis & mastering so % never stalls on a fixed number
   let hbTick = 0;
   const heartbeat = setInterval(() => {
     if (job.status !== 'processing') return;
@@ -2857,85 +2673,39 @@ async function executeVideoJobInBackground(job: VideoJobState): Promise<void> {
     const wanPrompt = buildWanTextToVideoPrompt(job.prompt, job.aspectRatio);
     updateProgress(6);
 
-    // Tier 1: Wan-AI/Wan2.2-T2V-A14B (Wan 2.2 14B Text-to-Video — Primary)
-    const tier1 = await generateViaWan22A14BT2V(
+    // 1. Try Hugging Face Inference Providers (fal-ai / wavespeed) first when HF_TOKEN supports it
+    const infVideo = await generateViaHfInferenceRouterVideo(
       wanPrompt,
       job.duration,
       job.aspectRatio,
       job.quality,
       updateProgress
     );
-    if (tier1.url) {
+    if (infVideo) {
       job.progress = 100;
       job.status = 'completed';
-      job.videoUrl = tier1.url;
-      job.model = WAN22_14B_T2V_MODEL;
+      job.videoUrl = infVideo.url;
+      job.model = infVideo.model;
       return;
     }
 
-    // Always try Tiers 2, 3, and 4 even if an earlier tier returned event:error
-    // Tier 2: Wan-AI/Wan2.2-TI2V-5B (Wan 2.2 5B Native 24fps Text-to-Video)
-    const tier2 = await generateViaWan225BHdT2V(
-      wanPrompt,
-      job.duration,
-      job.aspectRatio,
-      job.quality,
-      updateProgress
-    );
-    if (tier2.url) {
-      job.progress = 100;
-      job.status = 'completed';
-      job.videoUrl = tier2.url;
-      job.model = WAN22_5B_T2V_MODEL;
-      return;
-    }
-
-    // Tier 3: Wan-AI/Wan2.1-T2V-14B (rCM-Wan 2.1 14B Text-to-Video)
-    const wan21RcmUrl = await generateViaWan21Rcm14BT2V(
-      wanPrompt,
-      job.duration,
-      job.aspectRatio,
-      job.quality,
-      updateProgress
-    );
-    if (wan21RcmUrl) {
-      job.progress = 100;
-      job.status = 'completed';
-      job.videoUrl = wan21RcmUrl;
-      job.model = WAN21_14B_RCM_T2V_MODEL;
-      return;
-    }
-
-    // Tier 4: Wan-AI/Wan2.1-T2V-1.3B (Wan 2.1 Base Text-to-Video)
-    const wan21BaseUrl = await generateViaWan21BaseT2V(
-      wanPrompt,
-      job.duration,
-      job.aspectRatio,
-      job.quality,
-      updateProgress
-    );
-    if (wan21BaseUrl) {
-      job.progress = 100;
-      job.status = 'completed';
-      job.videoUrl = wan21BaseUrl;
-      job.model = WAN21_BASE_T2V_MODEL;
-      return;
-    }
-
-    // Tier 5: Fast ZeroGPU-independent storyboard motion MP4 synthesis
-    const storyboardUrl = await generateCinematicStoryboardVideoFallback(
-      job.prompt,
-      job.duration,
-      job.aspectRatio,
-      job.quality,
-      updateProgress
-    );
-    if (storyboardUrl) {
-      job.progress = 100;
-      job.status = 'completed';
-      job.videoUrl = storyboardUrl;
-      job.model = 'BloopX-Motion-Compositor';
-      return;
+    // 2. Try all verified RUNNING real Text-to-Video Spaces (Wan 2.1, Wan 2.2, LTX-Video)
+    for (const tier of LIVE_VIDEO_SPACE_TIERS) {
+      const videoUrl = await generateViaLiveSpaceTier(
+        tier,
+        wanPrompt,
+        job.duration,
+        job.aspectRatio,
+        job.quality,
+        updateProgress
+      );
+      if (videoUrl) {
+        job.progress = 100;
+        job.status = 'completed';
+        job.videoUrl = videoUrl;
+        job.model = tier.model;
+        return;
+      }
     }
 
     job.status = 'failed';
@@ -3013,20 +2783,6 @@ app.post('/api/master-wan-video', async (req, res) => {
   });
 });
 
-// Plan storyboard keyframes quickly (<2.5s) for ZeroGPU-independent Tier 5 video fallback
-app.post('/api/video-storyboard', async (req, res) => {
-  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
-  const frameCount = Number(req.body?.frameCount) === 2 ? 2 : 3;
-  if (!prompt) {
-    return res.status(400).json({ error: 'prompt is required' });
-  }
-  try {
-    const framePrompts = await planVideoStoryboardFrames(prompt, frameCount);
-    return res.json({ framePrompts });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Unable to plan storyboard frames.' });
-  }
-});
 
 // Start async Text-to-Video job immediately (< 5ms response prevents any Cloud Run 60s HTTP timeout)
 app.post('/api/generate-video', async (req, res) => {
