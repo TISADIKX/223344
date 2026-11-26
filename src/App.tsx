@@ -1851,7 +1851,7 @@ export default function App() {
             let sawActiveProgress = false;
             const initialActivityTimeout = setTimeout(() => {
               if (!sawActiveProgress) sseCtrl.abort();
-            }, 40000);
+            }, 45000);
 
             const sseRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}/${eventId}`, {
               signal: sseCtrl.signal,
@@ -1876,6 +1876,7 @@ export default function App() {
                 if (
                   chunk.includes('"index"') ||
                   chunk.includes('generating') ||
+                  chunk.includes('heartbeat') ||
                   chunk.includes('event: complete')
                 ) {
                   sawActiveProgress = true;
@@ -1910,8 +1911,8 @@ export default function App() {
               clearTimeout(initialActivityTimeout);
             }
 
-            const urlMatch = sseText.match(/"url":\s*"([^"]+\.mp4[^"]*)"/i);
-            const pathMatch = sseText.match(/"path":\s*"([^"]+\.mp4)"/i);
+            const urlMatch = sseText.match(/"url":\s*"([^"]+\.(?:mp4|webm|mov)[^"]*)"/i);
+            const pathMatch = sseText.match(/"path":\s*"([^"]+\.(?:mp4|webm|mov))"/i);
             const rawVideoUrl = urlMatch?.[1]
               ? urlMatch[1].startsWith('http')
                 ? urlMatch[1]
@@ -2021,7 +2022,7 @@ export default function App() {
                     signal: AbortSignal.timeout(55000),
                   });
                   if (!pollRes.ok) {
-                    if (pollRes.status === 404) break;
+                    if (pollRes.status === 404 || pollRes.status === 504) break;
                     consecutiveServerErrors += 1;
                     if (consecutiveServerErrors >= 2) break;
                     continue;
@@ -2084,6 +2085,48 @@ export default function App() {
               startPct: 14,
             },
             {
+              baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
+              endpoint: '/generate',
+              payload: [wanPrompt, -1, 24, 25],
+              startPct: 18,
+            },
+            {
+              baseUrl: 'https://upsampler-ltx-2-5.hf.space',
+              endpoint: '/generate_video',
+              payload: [
+                wanPrompt,
+                null,
+                selectedAspect === '9:16' ? 832 : 512,
+                selectedAspect === '9:16' ? 512 : selectedAspect === '1:1' ? 512 : 832,
+                2,
+                42,
+                'conv',
+                false,
+                true,
+                true,
+              ],
+              startPct: 20,
+            },
+            {
+              baseUrl: 'https://prithivmlmods-nava-text-to-video.hf.space',
+              endpoint: '/infer_fn',
+              payload: [
+                wanPrompt,
+                '',
+                null,
+                null,
+                null,
+                16,
+                4,
+                selectedAspect === '9:16'
+                  ? '9:16 (704×1280)'
+                  : selectedAspect === '1:1'
+                  ? '1:1 (960×960)'
+                  : '16:9 (1280×704)',
+              ],
+              startPct: 21,
+            },
+            {
               baseUrl: 'https://lightricks-ltx-2-5.hf.space',
               endpoint: '/run',
               payload: [
@@ -2098,7 +2141,7 @@ export default function App() {
                 true,
                 false,
               ],
-              startPct: 18,
+              startPct: 22,
             },
             {
               baseUrl: 'https://lightricks-ltx-2-3.hf.space',
@@ -2113,7 +2156,7 @@ export default function App() {
                 ltxH,
                 ltxW,
               ],
-              startPct: 21,
+              startPct: 26,
             },
             {
               baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
@@ -2133,13 +2176,7 @@ export default function App() {
                 1.0,
                 false,
               ],
-              startPct: 24,
-            },
-            {
-              baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
-              endpoint: '/generate',
-              payload: [wanPrompt, -1, 24, 25],
-              startPct: 28,
+              startPct: 30,
             },
             {
               baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
@@ -2401,15 +2438,15 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
     <div className="h-screen h-[100dvh] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] relative">
-      {/* Main Content */}
-      <div className="w-full flex-1 flex flex-col justify-between max-w-4xl mx-auto h-full min-h-0 relative">
+      {/* Main Content — full browser width */}
+      <div className="w-full flex-1 flex flex-col justify-between h-full min-h-0 relative">
           
           {/* Top Header */}
           <motion.header
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full flex items-center justify-between px-4 sm:px-6 pt-4 pb-2 z-30 shrink-0"
+            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0"
           >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
               <motion.button 
@@ -2513,14 +2550,14 @@ export default function App() {
         </motion.header>
 
         {/* Chat Canvas */}
-        <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col z-10">
+        <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10">
           {messages.length === 0 && !isThinking ? (
             <motion.div
               key={currentScope || 'guest'}
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
-              className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto relative"
+              className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto relative w-full max-w-5xl mx-auto"
               id="empty-state"
             >
               <div className="relative mb-5 flex items-center justify-center">
@@ -2538,13 +2575,13 @@ export default function App() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.08, duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
-                className="text-3xl sm:text-5xl md:text-6xl font-semibold text-[#e3e3e3] tracking-tight leading-tight max-w-3xl drop-shadow-sm"
+                className="text-3xl sm:text-5xl md:text-6xl font-semibold text-[#e3e3e3] tracking-tight leading-tight max-w-4xl drop-shadow-sm"
               >
                 What would you like to explore today?
               </motion.h1>
             </motion.div>
           ) : (
-            <div className="space-y-5 w-full flex-1">
+            <div className="space-y-5 w-full max-w-6xl mx-auto flex-1">
               <AnimatePresence initial={false}>
               {messages.map((msg, idx) => (
                 <motion.div
@@ -2605,10 +2642,10 @@ export default function App() {
                           transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                           className={`w-full ${
                             msg.generatedVideo.aspectRatio === '9:16'
-                              ? 'max-w-[280px]'
+                              ? 'max-w-[300px]'
                               : msg.generatedVideo.aspectRatio === '1:1'
-                              ? 'max-w-md'
-                              : 'max-w-xl'
+                              ? 'max-w-lg'
+                              : 'max-w-2xl'
                           }`}
                         >
                           <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#252525] shadow-2xl group">
@@ -2653,12 +2690,12 @@ export default function App() {
                           transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                           className={`w-full ${
                             msg.generatedPhoto.aspectRatio === '9:16'
-                              ? 'max-w-[280px]'
+                              ? 'max-w-[300px]'
                               : msg.generatedPhoto.aspectRatio === '3:4'
-                              ? 'max-w-[330px]'
+                              ? 'max-w-[360px]'
                               : msg.generatedPhoto.aspectRatio === '16:9'
-                              ? 'max-w-lg'
-                              : 'max-w-md'
+                              ? 'max-w-2xl'
+                              : 'max-w-lg'
                           }`}
                         >
                           <div className="rounded-[24px] overflow-hidden border border-white/[0.08] bg-[#252525] shadow-xl">
@@ -2729,12 +2766,12 @@ export default function App() {
                       id="photo-creation-placeholder"
                       className={`w-full select-none ${
                         pendingPhotoAspect === '9:16'
-                          ? 'max-w-[280px]'
+                          ? 'max-w-[300px]'
                           : pendingPhotoAspect === '3:4'
-                          ? 'max-w-[330px]'
+                          ? 'max-w-[360px]'
                           : pendingPhotoAspect === '16:9'
-                          ? 'max-w-lg'
-                          : 'max-w-md'
+                          ? 'max-w-2xl'
+                          : 'max-w-lg'
                       }`}
                     >
                       <div className="mb-3 flex items-center gap-2.5 px-0.5">
@@ -2771,10 +2808,10 @@ export default function App() {
                       id="video-creation-placeholder"
                       className={`w-full select-none ${
                         pendingVideoAspect === '9:16'
-                          ? 'max-w-[280px]'
+                          ? 'max-w-[300px]'
                           : pendingVideoAspect === '1:1'
-                          ? 'max-w-md'
-                          : 'max-w-xl'
+                          ? 'max-w-lg'
+                          : 'max-w-2xl'
                       }`}
                     >
                       <div className="mb-3 flex items-center justify-between gap-3 px-0.5">
@@ -2885,7 +2922,8 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="p-3 sm:p-5 z-20 w-full relative shrink-0">
+        <div className="px-3 pb-3 pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0">
+          <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}
           {uploadError && (
@@ -2928,7 +2966,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 6, scale: 0.97 }}
               transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-              className="absolute left-4 sm:left-6 bottom-20 sm:bottom-24 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-52 border border-white/10 origin-bottom-left"
+              className="absolute left-0 bottom-16 sm:bottom-20 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-52 border border-white/10 origin-bottom-left"
             >
               <button 
                 id="upload-media-btn" 
@@ -2965,7 +3003,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 6, scale: 0.97 }}
               transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-              className="absolute left-14 sm:left-16 bottom-20 sm:bottom-24 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-48 border border-white/10 origin-bottom-left"
+              className="absolute left-10 bottom-16 sm:bottom-20 bg-[#252525] rounded-2xl p-1.5 shadow-2xl z-30 w-48 border border-white/10 origin-bottom-left"
             >
               {/* Option 1: Chat mode */}
               <button 
@@ -3311,6 +3349,7 @@ export default function App() {
               </div>
             </div>
           </motion.div>
+          </div>
         </div>
 
         {/* Auth Modal: Google Sign-in (only shown when not already logged in) */}

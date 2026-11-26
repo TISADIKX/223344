@@ -2481,7 +2481,7 @@ async function masterWanVideoSmooth(
       finalOutPath,
     ];
 
-    await runFfmpegWithProgress(args, targetFrames, 75000, (ratio) => {
+    await runFfmpegWithProgress(args, targetFrames, 45000, (ratio) => {
       onProgress?.(Math.min(99, Math.round(84 + ratio * 15)));
     });
 
@@ -2572,20 +2572,28 @@ async function fetchAndMasterWanClip(
     const buf = Buffer.from(await vidRes.arrayBuffer());
     if (buf.length < 8000) return null;
     onProgress?.(84);
-    return await masterWanVideoSmooth(buf, targetSeconds, aspectRatio, quality, onProgress);
+    const mastered = await masterWanVideoSmooth(buf, targetSeconds, aspectRatio, quality, onProgress);
+    if (mastered) return mastered;
+
+    // Never discard an already-generated AI video if FFmpeg mastering failed or timed out
+    const rawId = `vid_raw_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const rawOutPath = path.join(GENERATED_VIDEOS_DIR, `${rawId}.mp4`);
+    await fs.promises.writeFile(rawOutPath, buf);
+    onProgress?.(100);
+    return `/api/videos/${rawId}.mp4`;
   } catch {
     return null;
   }
 }
 
 function extractGradioVideoUrl(sseText: string, spaceBaseUrl: string): string | null {
-  const urlMatch = sseText.match(/"url":\s*"([^"]+\.mp4[^"]*)"/i);
+  const urlMatch = sseText.match(/"url":\s*"([^"]+\.(?:mp4|webm|mov)[^"]*)"/i);
   if (urlMatch && urlMatch[1]) {
     return urlMatch[1].startsWith('http')
       ? urlMatch[1]
       : `${spaceBaseUrl}/gradio_api/file=${urlMatch[1]}`;
   }
-  const pathMatch = sseText.match(/"path":\s*"([^"]+\.mp4)"/i);
+  const pathMatch = sseText.match(/"path":\s*"([^"]+\.(?:mp4|webm|mov))"/i);
   if (pathMatch && pathMatch[1]) {
     return `${spaceBaseUrl}/gradio_api/file=${pathMatch[1]}`;
   }
@@ -2679,11 +2687,75 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     },
   },
   {
+    model: 'damo-vilab/text-to-video-ms-1.7b',
+    baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
+    endpoint: '/generate',
+    timeoutMs: 65000,
+    startPct: 14,
+    endPct: 80,
+    buildPayload: (wanPrompt) => [
+      wanPrompt,
+      -1,
+      24,
+      25,
+    ],
+  },
+  {
+    model: 'Lightricks/LTX-2.5',
+    baseUrl: 'https://upsampler-ltx-2-5.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 65000,
+    startPct: 15,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const [h, w] =
+        aspectRatio === '9:16'
+          ? [832, 512]
+          : aspectRatio === '1:1'
+          ? [512, 512]
+          : [512, 832];
+      return [
+        wanPrompt,
+        null,
+        h,
+        w,
+        2,
+        42,
+        'conv',
+        false,
+        true,
+        true,
+      ];
+    },
+  },
+  {
+    model: 'prithivMLmods/NAVA-Text-to-Video',
+    baseUrl: 'https://prithivmlmods-nava-text-to-video.hf.space',
+    endpoint: '/infer_fn',
+    timeoutMs: 65000,
+    startPct: 15,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => [
+      wanPrompt,
+      '',
+      null,
+      null,
+      null,
+      16,
+      4,
+      aspectRatio === '9:16'
+        ? '9:16 (704×1280)'
+        : aspectRatio === '1:1'
+        ? '1:1 (960×960)'
+        : '16:9 (1280×704)',
+    ],
+  },
+  {
     model: 'Lightricks/LTX-2.5',
     baseUrl: 'https://lightricks-ltx-2-5.hf.space',
     endpoint: '/run',
     timeoutMs: 65000,
-    startPct: 12,
+    startPct: 16,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
@@ -2711,7 +2783,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     baseUrl: 'https://lightricks-ltx-2-3.hf.space',
     endpoint: '/generate_video',
     timeoutMs: 65000,
-    startPct: 14,
+    startPct: 18,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
@@ -2737,7 +2809,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
     endpoint: '/text_to_video',
     timeoutMs: 60000,
-    startPct: 15,
+    startPct: 20,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
@@ -2762,20 +2834,6 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         false,
       ];
     },
-  },
-  {
-    model: 'damo-vilab/text-to-video-ms-1.7b',
-    baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
-    endpoint: '/generate',
-    timeoutMs: 65000,
-    startPct: 16,
-    endPct: 80,
-    buildPayload: (wanPrompt) => [
-      wanPrompt,
-      -1,
-      24,
-      25,
-    ],
   },
   {
     model: WAN21_BASE_T2V_MODEL,
@@ -2878,7 +2936,8 @@ async function generateViaLiveSpaceTier(
     ? [{ Authorization: `Bearer ${token}`, 'X-HF-Token': token }, {}]
     : [{}];
 
-  for (const authHeaders of headerSets) {
+  for (let i = 0; i < headerSets.length; i++) {
+    const authHeaders = headerSets[i];
     try {
       const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
         method: 'POST',
@@ -2892,7 +2951,7 @@ async function generateViaLiveSpaceTier(
       const eventId = postJson?.event_id;
       if (!eventId) continue;
 
-      const { sseText } = await readGradioSseWithProgress(
+      const { sseText, quotaExceeded } = await readGradioSseWithProgress(
         `${tier.baseUrl}/gradio_api/call${tier.endpoint}/${eventId}`,
         authHeaders,
         tier.timeoutMs,
@@ -2900,7 +2959,12 @@ async function generateViaLiveSpaceTier(
         tier.endPct,
         onProgress
       );
-      if (!sseText) continue;
+      if (!sseText) {
+        if (i === 0 && !quotaExceeded && tier.startPct >= 16) {
+          break;
+        }
+        continue;
+      }
 
       const rawUrl = extractGradioVideoUrl(sseText, tier.baseUrl);
       if (rawUrl) {
