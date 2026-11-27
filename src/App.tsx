@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { motion, AnimatePresence, MotionConfig } from 'motion/react';
 import { marked } from 'marked';
 import { HistorySidebar } from './components/HistorySidebar';
@@ -14,6 +14,7 @@ import {
   applyCanvasPhotoFilterPlan,
   conformVideoToSettingsInBrowser,
   editPhotoDirectlyInBrowser,
+  generateMultiKeyframeMotionVideoInBrowser,
   generatePhotoDirectlyInBrowser,
   pollAiHordeImageInBrowser,
 } from './lib/mediaFallback';
@@ -593,32 +594,45 @@ export default function App() {
     textareaRef.current?.focus();
   }, []);
 
-  // Keep outer document/viewport locked at scroll (0, 0) so header and prompt bar never bounce up/down on mobile
-  useEffect(() => {
-    const resetViewportScroll = () => {
+  // Keep outer document/viewport pinned to exact visualViewport height/offset so Android Chrome never shifts up/down
+  useLayoutEffect(() => {
+    const syncViewportMetrics = () => {
+      const vv = window.visualViewport;
+      const root = document.documentElement;
+      if (vv) {
+        root.style.setProperty('--app-height', `${Math.max(320, Math.round(vv.height))}px`);
+        root.style.setProperty('--app-offset-top', `${Math.max(0, Math.round(vv.offsetTop))}px`);
+      } else {
+        root.style.setProperty('--app-height', `${Math.max(320, window.innerHeight)}px`);
+        root.style.setProperty('--app-offset-top', '0px');
+      }
       if (window.scrollX !== 0 || window.scrollY !== 0) {
         window.scrollTo(0, 0);
       }
-      if (document.documentElement.scrollTop !== 0) {
-        document.documentElement.scrollTop = 0;
+      if (root.scrollTop !== 0) {
+        root.scrollTop = 0;
       }
       if (document.body.scrollTop !== 0) {
         document.body.scrollTop = 0;
       }
     };
 
-    resetViewportScroll();
-    window.addEventListener('scroll', resetViewportScroll, { passive: true });
+    syncViewportMetrics();
+    window.addEventListener('scroll', syncViewportMetrics, { passive: true });
+    window.addEventListener('resize', syncViewportMetrics, { passive: true });
+    window.addEventListener('orientationchange', syncViewportMetrics, { passive: true });
     const vv = window.visualViewport;
     if (vv) {
-      vv.addEventListener('scroll', resetViewportScroll, { passive: true });
-      vv.addEventListener('resize', resetViewportScroll, { passive: true });
+      vv.addEventListener('scroll', syncViewportMetrics, { passive: true });
+      vv.addEventListener('resize', syncViewportMetrics, { passive: true });
     }
     return () => {
-      window.removeEventListener('scroll', resetViewportScroll);
+      window.removeEventListener('scroll', syncViewportMetrics);
+      window.removeEventListener('resize', syncViewportMetrics);
+      window.removeEventListener('orientationchange', syncViewportMetrics);
       if (vv) {
-        vv.removeEventListener('scroll', resetViewportScroll);
-        vv.removeEventListener('resize', resetViewportScroll);
+        vv.removeEventListener('scroll', syncViewportMetrics);
+        vv.removeEventListener('resize', syncViewportMetrics);
       }
     };
   }, []);
@@ -1861,39 +1875,39 @@ export default function App() {
         let finalVideoUrl: string | null = null;
         let serverMastered = false;
 
-        // Stream Gradio SSE with live step-by-step % updates + async 30fps server mastering
-        const callWanSpaceAndMaster = async (
+        // Fetch raw clip URL from a Gradio Space via SSE (safe to race in parallel; mastering happens only on winner)
+        const fetchRawSpaceVideo = async (
           spaceBase: string,
           endpoint: string,
           payloadData: unknown[],
           sseStartPct: number,
-          sseEndPct: number
-        ): Promise<{ url: string | null; quotaExceeded: boolean; mastered: boolean }> => {
+          sseEndPct: number,
+          hardTimeoutMs: number = 32000
+        ): Promise<{ rawUrl: string | null; quotaExceeded: boolean }> => {
           try {
             const postRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ data: payloadData }),
-              signal: AbortSignal.timeout(14000),
+              signal: AbortSignal.timeout(10000),
             });
             if (!postRes.ok) {
               const errBody = await postRes.text().catch(() => '');
               return {
-                url: null,
+                rawUrl: null,
                 quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(errBody),
-                mastered: false,
               };
             }
             const postJson = await postRes.json();
             const eventId = postJson?.event_id;
-            if (!eventId) return { url: null, quotaExceeded: false, mastered: false };
+            if (!eventId) return { rawUrl: null, quotaExceeded: false };
 
             const sseCtrl = new AbortController();
-            const sseHardTimeout = setTimeout(() => sseCtrl.abort(), 95000);
+            const sseHardTimeout = setTimeout(() => sseCtrl.abort(), hardTimeoutMs);
             let sawActiveProgress = false;
             const initialActivityTimeout = setTimeout(() => {
               if (!sawActiveProgress) sseCtrl.abort();
-            }, 45000);
+            }, 18000);
 
             const sseRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}/${eventId}`, {
               signal: sseCtrl.signal,
@@ -1901,7 +1915,7 @@ export default function App() {
             if (!sseRes.ok || !sseRes.body) {
               clearTimeout(sseHardTimeout);
               clearTimeout(initialActivityTimeout);
-              return { url: null, quotaExceeded: false, mastered: false };
+              return { rawUrl: null, quotaExceeded: false };
             }
 
             const reader = sseRes.body.getReader();
@@ -1924,31 +1938,29 @@ export default function App() {
                   sawActiveProgress = true;
                 }
 
-              const idxMatch = chunk.match(/"index":\s*(\d+)\s*,\s*"length":\s*(\d+)/);
-              if (idxMatch) {
-                const stepIdx = Number(idxMatch[1]);
-                const stepLen = Math.max(1, Number(idxMatch[2]));
-                stepRatio = Math.max(stepRatio, Math.min(0.97, (stepIdx + 1) / stepLen));
-                const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
-                advanceVideoFloor(mapped);
-              } else if (chunk.includes('heartbeat') || chunk.includes('generating')) {
-                stepRatio = Math.min(0.92, stepRatio + 0.08);
-                const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
-                advanceVideoFloor(mapped);
-              }
+                const idxMatch = chunk.match(/"index":\s*(\d+)\s*,\s*"length":\s*(\d+)/);
+                if (idxMatch) {
+                  const stepIdx = Number(idxMatch[1]);
+                  const stepLen = Math.max(1, Number(idxMatch[2]));
+                  stepRatio = Math.max(stepRatio, Math.min(0.97, (stepIdx + 1) / stepLen));
+                  const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
+                  advanceVideoFloor(mapped);
+                } else if (chunk.includes('heartbeat') || chunk.includes('generating')) {
+                  stepRatio = Math.min(0.92, stepRatio + 0.08);
+                  const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
+                  advanceVideoFloor(mapped);
+                }
 
-              if (sseText.includes('event: error')) {
-                try {
-                  await reader.cancel();
-                } catch {}
-                const isExplicitQuota = /ZeroGPU quota|exceeded your.*quota/i.test(sseText);
-                return {
-                  url: null,
-                  quotaExceeded: isExplicitQuota,
-                  mastered: false,
-                };
+                if (sseText.includes('event: error')) {
+                  try {
+                    await reader.cancel();
+                  } catch {}
+                  return {
+                    rawUrl: null,
+                    quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+                  };
+                }
               }
-            }
             } finally {
               clearTimeout(sseHardTimeout);
               clearTimeout(initialActivityTimeout);
@@ -1963,14 +1975,20 @@ export default function App() {
               : pathMatch?.[1]
               ? `${spaceBase}/gradio_api/file=${pathMatch[1]}`
               : null;
-            if (!rawVideoUrl) {
-              return {
-                url: null,
-                quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
-                mastered: false,
-              };
-            }
 
+            return {
+              rawUrl: rawVideoUrl,
+              quotaExceeded: !rawVideoUrl && /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+            };
+          } catch {
+            return { rawUrl: null, quotaExceeded: false };
+          }
+        };
+
+        const masterWinningRawVideo = async (
+          rawVideoUrl: string
+        ): Promise<{ url: string; mastered: boolean }> => {
+          try {
             advanceVideoFloor(82);
             const masterRes = await fetch('/api/master-wan-video', {
               method: 'POST',
@@ -1981,26 +1999,25 @@ export default function App() {
                 aspectRatio: selectedAspect,
                 quality: selectedQuality,
               }),
-              signal: AbortSignal.timeout(15000),
+              signal: AbortSignal.timeout(12000),
             });
-            if (!masterRes.ok) return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
+            if (!masterRes.ok) return { url: rawVideoUrl, mastered: false };
             const masterJson = await masterRes.json();
             if (masterJson?.videoUrl) {
               return {
                 url: masterJson.videoUrl,
-                quotaExceeded: false,
                 mastered: Boolean(masterJson?.mastered),
               };
             }
 
             let masterJobId = masterJson?.jobId;
-            if (!masterJobId) return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
+            if (!masterJobId) return { url: rawVideoUrl, mastered: false };
 
-            for (let mPoll = 0; mPoll < 95; mPoll++) {
+            for (let mPoll = 0; mPoll < 60; mPoll++) {
               await new Promise((r) => setTimeout(r, 850));
               try {
                 const mStatusRes = await fetch(`/api/generate-video/status/${masterJobId}`, {
-                  signal: AbortSignal.timeout(15000),
+                  signal: AbortSignal.timeout(12000),
                 });
                 if (!mStatusRes.ok) continue;
                 const mStatusJson = await mStatusRes.json();
@@ -2013,7 +2030,6 @@ export default function App() {
                 if (mStatusJson?.status === 'completed' && mStatusJson?.videoUrl) {
                   return {
                     url: mStatusJson.videoUrl,
-                    quotaExceeded: false,
                     mastered: Boolean(mStatusJson?.mastered),
                   };
                 }
@@ -2022,10 +2038,8 @@ export default function App() {
                 // Continue polling on transient network hiccup
               }
             }
-            return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
-          } catch {
-            return { url: null, quotaExceeded: false, mastered: false };
-          }
+          } catch {}
+          return { url: rawVideoUrl, mastered: false };
         };
 
         const [w1W, w1H] =
@@ -2047,8 +2061,7 @@ export default function App() {
             ? [512, 512]
             : [512, 704];
 
-        // 1. Server-authenticated Text-to-Video first (HF Inference Providers + HF_TOKEN Spaces)
-        let serverJobFinishedWithFailure = false;
+        // 1. Server-authenticated Text-to-Video first (HF Inference Providers / Gemini Veo / fast server edge)
         try {
           const startRes = await fetch('/api/generate-video', {
             method: 'POST',
@@ -2059,7 +2072,7 @@ export default function App() {
               aspectRatio: selectedAspect,
               quality: selectedQuality,
             }),
-            signal: AbortSignal.timeout(45000),
+            signal: AbortSignal.timeout(30000),
           });
 
           if (startRes.ok) {
@@ -2070,11 +2083,11 @@ export default function App() {
             } else {
               let activeJobId = startData?.jobId;
               let consecutiveServerErrors = 0;
-              for (let pollIdx = 0; activeJobId && !finalVideoUrl && pollIdx < 240; pollIdx++) {
-                await new Promise((r) => setTimeout(r, 950));
+              for (let pollIdx = 0; activeJobId && !finalVideoUrl && pollIdx < 70; pollIdx++) {
+                await new Promise((r) => setTimeout(r, 900));
                 try {
                   const pollRes = await fetch(`/api/generate-video/status/${activeJobId}`, {
-                    signal: AbortSignal.timeout(55000),
+                    signal: AbortSignal.timeout(26000),
                   });
                   if (!pollRes.ok) {
                     if (pollRes.status === 404 || pollRes.status === 504) break;
@@ -2095,8 +2108,7 @@ export default function App() {
                     serverMastered = Boolean(pollData?.mastered);
                     break;
                   }
-                  if (pollData?.status === 'failed') {
-                    serverJobFinishedWithFailure = true;
+                  if (pollData?.quotaLimited || pollData?.status === 'failed') {
                     break;
                   }
                 } catch {
@@ -2107,10 +2119,10 @@ export default function App() {
             }
           }
         } catch {
-          // Fall back cleanly to browser-edge verified live Spaces below
+          // Fall back cleanly to browser-edge parallel races below
         }
 
-        // 2. Fallback to verified RUNNING pure Text-to-Video browser-edge Spaces if server route did not succeed
+        // 2. Parallel browser-edge Wave 1 & Wave 2 races across verified Text-to-Video Spaces
         if (!finalVideoUrl) {
           const upsamplerAspect =
             selectedAspect === '9:16'
@@ -2118,33 +2130,17 @@ export default function App() {
               : selectedAspect === '1:1'
               ? '1:1 (640x640)'
               : '16:9 (832x480)';
-          const browserVideoTiers: Array<{
+          const wave1Tiers: Array<{
             baseUrl: string;
             endpoint: string;
             payload: unknown[];
             startPct: number;
           }> = [
             {
-              baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
-              endpoint: '/generate_video',
-              payload: [
-                wanPrompt,
-                upsamplerAspect,
-                5,
-                wanNeg,
-                4,
-                1,
-                1,
-                Math.floor(Math.random() * 2147483647),
-                true,
-              ],
-              startPct: 14,
-            },
-            {
               baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
               endpoint: '/generate',
               payload: [wanPrompt, -1, 32, 25],
-              startPct: 18,
+              startPct: 16,
             },
             {
               baseUrl: 'https://upsampler-ltx-2-5.hf.space',
@@ -2164,6 +2160,30 @@ export default function App() {
               startPct: 20,
             },
             {
+              baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
+              endpoint: '/generate_video',
+              payload: [
+                wanPrompt,
+                upsamplerAspect,
+                4,
+                wanNeg,
+                4,
+                1,
+                1,
+                Math.floor(Math.random() * 2147483647),
+                true,
+              ],
+              startPct: 22,
+            },
+          ];
+
+          const wave2Tiers: Array<{
+            baseUrl: string;
+            endpoint: string;
+            payload: unknown[];
+            startPct: number;
+          }> = [
+            {
               baseUrl: 'https://prithivmlmods-nava-text-to-video.hf.space',
               endpoint: '/infer_fn',
               payload: [
@@ -2180,7 +2200,7 @@ export default function App() {
                   ? '1:1 (960×960)'
                   : '16:9 (1280×704)',
               ],
-              startPct: 21,
+              startPct: 26,
             },
             {
               baseUrl: 'https://lightricks-ltx-2-5.hf.space',
@@ -2197,7 +2217,7 @@ export default function App() {
                 true,
                 false,
               ],
-              startPct: 22,
+              startPct: 28,
             },
             {
               baseUrl: 'https://lightricks-ltx-2-3.hf.space',
@@ -2212,7 +2232,7 @@ export default function App() {
                 ltxH,
                 ltxW,
               ],
-              startPct: 26,
+              startPct: 30,
             },
             {
               baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
@@ -2232,13 +2252,13 @@ export default function App() {
                 1.0,
                 false,
               ],
-              startPct: 30,
+              startPct: 34,
             },
             {
               baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
               endpoint: '/generate',
               payload: ['wan-base', wanPrompt, wanNeg, w1W, w1H, 81, 18, 5, -1, 1, null],
-              startPct: 34,
+              startPct: 36,
             },
             {
               baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
@@ -2257,35 +2277,78 @@ export default function App() {
                 'No LoRA',
                 null,
               ],
-              startPct: 40,
+              startPct: 38,
             },
             {
               baseUrl: 'https://zai-org-cogvideox-2b-space.hf.space',
               endpoint: '/generate',
               payload: [wanPrompt, 35, 6],
-              startPct: 48,
+              startPct: 40,
             },
             {
               baseUrl: 'https://zai-org-cogvideox-5b-space.hf.space',
               endpoint: '/generate',
               payload: [wanPrompt, null, null, 0.8, -1, false, false],
-              startPct: 56,
+              startPct: 42,
             },
           ];
 
-          void serverJobFinishedWithFailure;
+          const raceTierWave = async (
+            tiers: typeof wave1Tiers,
+            hardTimeoutMs: number
+          ): Promise<{ rawUrl: string | null; allQuotaExceeded: boolean }> => {
+            let quotaHits = 0;
+            try {
+              const winningRawUrl = await Promise.any(
+                tiers.map(async (tier) => {
+                  const res = await fetchRawSpaceVideo(
+                    tier.baseUrl,
+                    tier.endpoint,
+                    tier.payload,
+                    tier.startPct,
+                    81,
+                    hardTimeoutMs
+                  );
+                  if (res.quotaExceeded) quotaHits += 1;
+                  if (!res.rawUrl) throw new Error('empty_space');
+                  return res.rawUrl;
+                })
+              );
+              return { rawUrl: winningRawUrl, allQuotaExceeded: false };
+            } catch {
+              return {
+                rawUrl: null,
+                allQuotaExceeded: quotaHits >= tiers.length,
+              };
+            }
+          };
 
-          for (const tier of browserVideoTiers) {
-            if (finalVideoUrl) break;
-            const res = await callWanSpaceAndMaster(
-              tier.baseUrl,
-              tier.endpoint,
-              tier.payload,
-              tier.startPct,
-              81
-            );
-            finalVideoUrl = res.url;
-            serverMastered = res.mastered;
+          const wave1Res = await raceTierWave(wave1Tiers, 28000);
+          let winningRawUrl = wave1Res.rawUrl;
+          if (!winningRawUrl && !wave1Res.allQuotaExceeded) {
+            const wave2Res = await raceTierWave(wave2Tiers, 26000);
+            winningRawUrl = wave2Res.rawUrl;
+          }
+
+          if (winningRawUrl) {
+            const mastered = await masterWinningRawVideo(winningRawUrl);
+            finalVideoUrl = mastered.url;
+            serverMastered = mastered.mastered;
+          }
+        }
+
+        // 3. Always-available non-ZeroGPU AI Multi-Keyframe Motion fallback if all remote GPU Spaces are quota-exhausted
+        if (!finalVideoUrl) {
+          const fallbackVideoUrl = await generateMultiKeyframeMotionVideoInBrowser(
+            cleanPrompt,
+            selectedDuration,
+            selectedAspect,
+            selectedQuality,
+            advanceVideoFloor
+          );
+          if (fallbackVideoUrl) {
+            finalVideoUrl = fallbackVideoUrl;
+            serverMastered = true;
           }
         }
 
@@ -2509,7 +2572,7 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="fixed inset-0 w-full h-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] overscroll-none">
+    <div className="fixed left-0 right-0 top-[var(--app-offset-top,0px)] h-[var(--app-height,100dvh)] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] overscroll-none">
       {/* Main Content — full browser width */}
       <div className="w-full flex-1 flex flex-col justify-between h-full min-h-0 relative">
           
@@ -2518,7 +2581,7 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 bg-[#191919]"
+            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 bg-[#191919] touch-none"
           >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
               <motion.button 
@@ -2622,14 +2685,22 @@ export default function App() {
         </motion.header>
 
         {/* Chat Canvas */}
-        <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10">
+        <div
+          id="chat-canvas"
+          ref={chatCanvasRef}
+          className={`flex-1 min-h-0 w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10 ${
+            messages.length === 0 && !isThinking
+              ? 'overflow-hidden touch-none'
+              : 'overflow-y-auto overscroll-y-contain touch-pan-y'
+          }`}
+        >
           {messages.length === 0 && !isThinking ? (
             <motion.div
               key={currentScope || 'guest'}
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
-              className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto relative w-full max-w-5xl mx-auto"
+              className="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4 select-none my-auto relative w-full max-w-5xl mx-auto touch-none"
               id="empty-state"
             >
               <div className="relative mb-5 flex items-center justify-center">
@@ -2994,7 +3065,7 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0 bg-[#191919]">
+        <div className="px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0 bg-[#191919] touch-none">
           <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}
@@ -3250,7 +3321,7 @@ export default function App() {
 
               {/* Media File Previews */}
               {attachedFiles.length > 0 && (
-                <div id="file-previews" className="flex flex-wrap items-center gap-2 mb-3 max-h-40 overflow-y-auto pt-1 pb-1">
+                <div id="file-previews" className="flex flex-wrap items-center gap-2 mb-3 max-h-40 overflow-y-auto touch-pan-y pt-1 pb-1">
                   <AnimatePresence initial={false}>
                   {attachedFiles.map((item) => (
                     <motion.div 
@@ -3311,7 +3382,7 @@ export default function App() {
                   }
                 }}
                 placeholder={currentUser ? getPlaceholderText() : 'Please sign in to chat, generate photos, or make videos...'}
-                className="w-full bg-transparent text-white placeholder-[#7e7e7e] text-[15px] sm:text-[16px] outline-none mb-3 resize-none max-h-32 min-h-[36px] caret-white relative z-30"
+                className="w-full bg-transparent text-white placeholder-[#7e7e7e] text-[15px] sm:text-[16px] outline-none mb-3 resize-none max-h-32 min-h-[36px] caret-white relative z-30 touch-pan-y"
               ></textarea>
 
               <div className="flex items-center justify-between pt-1">

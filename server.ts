@@ -2706,38 +2706,11 @@ interface LiveVideoSpaceTier {
 
 const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
   {
-    model: WAN22_14B_T2V_MODEL,
-    baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
-    endpoint: '/generate_video',
-    timeoutMs: 75000,
-    startPct: 10,
-    endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio, _duration) => {
-      const arChoice =
-        aspectRatio === '9:16'
-          ? '9:16 (480x832)'
-          : aspectRatio === '1:1'
-          ? '1:1 (640x640)'
-          : '16:9 (832x480)';
-      return [
-        wanPrompt,
-        arChoice,
-        5,
-        WAN_NEGATIVE_PROMPT,
-        4,
-        1,
-        1,
-        Math.floor(Math.random() * 2147483647),
-        true,
-      ];
-    },
-  },
-  {
     model: 'damo-vilab/text-to-video-ms-1.7b',
     baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
     endpoint: '/generate',
-    timeoutMs: 65000,
-    startPct: 14,
+    timeoutMs: 30000,
+    startPct: 10,
     endPct: 80,
     buildPayload: (wanPrompt) => [
       wanPrompt,
@@ -2750,10 +2723,10 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'Lightricks/LTX-2.5',
     baseUrl: 'https://upsampler-ltx-2-5.hf.space',
     endpoint: '/generate_video',
-    timeoutMs: 65000,
-    startPct: 15,
+    timeoutMs: 35000,
+    startPct: 14,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio, duration) => {
+    buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2765,7 +2738,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         null,
         h,
         w,
-        duration === 10 ? 5 : 5,
+        5,
         42,
         'conv',
         false,
@@ -2775,11 +2748,38 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     },
   },
   {
+    model: WAN22_14B_T2V_MODEL,
+    baseUrl: 'https://upsampler-wan-2-2-14b-text-to-video.hf.space',
+    endpoint: '/generate_video',
+    timeoutMs: 42000,
+    startPct: 16,
+    endPct: 80,
+    buildPayload: (wanPrompt, aspectRatio) => {
+      const arChoice =
+        aspectRatio === '9:16'
+          ? '9:16 (480x832)'
+          : aspectRatio === '1:1'
+          ? '1:1 (640x640)'
+          : '16:9 (832x480)';
+      return [
+        wanPrompt,
+        arChoice,
+        4,
+        WAN_NEGATIVE_PROMPT,
+        4,
+        1,
+        1,
+        Math.floor(Math.random() * 2147483647),
+        true,
+      ];
+    },
+  },
+  {
     model: 'prithivMLmods/NAVA-Text-to-Video',
     baseUrl: 'https://prithivmlmods-nava-text-to-video.hf.space',
     endpoint: '/infer_fn',
-    timeoutMs: 65000,
-    startPct: 15,
+    timeoutMs: 38000,
+    startPct: 18,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => [
       wanPrompt,
@@ -2800,10 +2800,10 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'Lightricks/LTX-2.5',
     baseUrl: 'https://lightricks-ltx-2-5.hf.space',
     endpoint: '/run',
-    timeoutMs: 65000,
-    startPct: 16,
+    timeoutMs: 38000,
+    startPct: 20,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio, duration) => {
+    buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2815,7 +2815,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         null,
         h,
         w,
-        duration === 10 ? 5 : 5,
+        5,
         42,
         'conv',
         false,
@@ -2828,8 +2828,8 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'Lightricks/LTX-2.3',
     baseUrl: 'https://lightricks-ltx-2-3.hf.space',
     endpoint: '/generate_video',
-    timeoutMs: 65000,
-    startPct: 18,
+    timeoutMs: 38000,
+    startPct: 22,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
@@ -2854,8 +2854,8 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'Lightricks/LTX-Video-Distilled',
     baseUrl: 'https://lightricks-ltx-video-distilled.hf.space',
     endpoint: '/text_to_video',
-    timeoutMs: 60000,
-    startPct: 20,
+    timeoutMs: 38000,
+    startPct: 24,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [h, w] =
@@ -2885,8 +2885,8 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: WAN21_BASE_T2V_MODEL,
     baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
     endpoint: '/generate',
-    timeoutMs: 55000,
-    startPct: 22,
+    timeoutMs: 42000,
+    startPct: 26,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [wanW, wanH] =
@@ -2914,8 +2914,8 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'Lightricks/LTX-2-Turbo',
     baseUrl: 'https://alexnasa-ltx-2-turbo.hf.space',
     endpoint: '/generate_video',
-    timeoutMs: 75000,
-    startPct: 28,
+    timeoutMs: 42000,
+    startPct: 30,
     endPct: 80,
     buildPayload: (wanPrompt, aspectRatio) => {
       const [ltxH, ltxW] =
@@ -2944,7 +2944,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'zai-org/CogVideoX-2b',
     baseUrl: 'https://zai-org-cogvideox-2b-space.hf.space',
     endpoint: '/generate',
-    timeoutMs: 75000,
+    timeoutMs: 45000,
     startPct: 34,
     endPct: 80,
     buildPayload: (wanPrompt) => [wanPrompt, 35, 6],
@@ -2953,7 +2953,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     model: 'zai-org/CogVideoX-5b',
     baseUrl: 'https://zai-org-cogvideox-5b-space.hf.space',
     endpoint: '/generate',
-    timeoutMs: 75000,
+    timeoutMs: 45000,
     startPct: 40,
     endPct: 80,
     buildPayload: (wanPrompt) => [
@@ -2976,11 +2976,13 @@ async function generateViaLiveSpaceTier(
   quality: VideoQualityOption,
   onProgress?: (pct: number) => void,
   clientHfToken?: string
-): Promise<{ url: string; mastered: boolean } | null> {
+): Promise<{ url: string; mastered: boolean; quotaExceeded?: boolean } | null> {
   const token = clientHfToken || HF_ACCESS_TOKEN;
   const headerSets: Array<Record<string, string>> = token
     ? [{ Authorization: `Bearer ${token}`, 'X-HF-Token': token }, {}]
     : [{}];
+
+  let sawQuota = false;
 
   for (let i = 0; i < headerSets.length; i++) {
     const authHeaders = headerSets[i];
@@ -2989,9 +2991,13 @@ async function generateViaLiveSpaceTier(
         method: 'POST',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio, targetSeconds, quality) }),
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(10000),
       });
-      if (!postRes.ok) continue;
+      if (!postRes.ok) {
+        const errTxt = await postRes.text().catch(() => '');
+        if (/ZeroGPU quota|exceeded your.*quota/i.test(errTxt)) sawQuota = true;
+        continue;
+      }
 
       const postJson: any = await postRes.json();
       const eventId = postJson?.event_id;
@@ -3005,6 +3011,7 @@ async function generateViaLiveSpaceTier(
         tier.endPct,
         onProgress
       );
+      if (quotaExceeded) sawQuota = true;
       if (!sseText) {
         if (i === 0 && !quotaExceeded && tier.startPct >= 16) {
           break;
@@ -3028,6 +3035,69 @@ async function generateViaLiveSpaceTier(
       console.warn(`Video Space (${tier.baseUrl}) attempt:`, err?.message || err);
     }
   }
+  return sawQuota ? ({ url: '', mastered: false, quotaExceeded: true } as any) : null;
+}
+
+async function generateViaGeminiVeoVideo(
+  wanPrompt: string,
+  targetSeconds: 5 | 10,
+  aspectRatio: VideoAspectOption,
+  quality: VideoQualityOption,
+  onProgress?: (pct: number) => void
+): Promise<{ url: string; model: string } | null> {
+  const geminiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (!geminiKey) return null;
+
+  const ai = new GoogleGenAI({ apiKey: geminiKey });
+  const veoAspect = aspectRatio === '9:16' ? '9:16' : '16:9';
+  const veoDuration = targetSeconds === 5 ? 5 : 8;
+
+  for (const model of ['veo-3.0-fast-generate-001', 'veo-2.0-generate-001']) {
+    try {
+      onProgress?.(18);
+      let operation = await ai.models.generateVideos({
+        model,
+        source: { prompt: wanPrompt },
+        config: {
+          numberOfVideos: 1,
+          aspectRatio: veoAspect,
+          durationSeconds: veoDuration,
+        },
+      });
+
+      const deadline = Date.now() + 50000;
+      while (!operation.done && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3500));
+        operation = await ai.operations.getVideosOperation({ operation });
+      }
+
+      const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+      if (videoUri) {
+        const res = await fetch(videoUri, {
+          headers: { 'x-goog-api-key': geminiKey },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          if (buf.length > 8000) {
+            onProgress?.(82);
+            const mastered = await masterWanVideoSmooth(
+              buf,
+              targetSeconds,
+              aspectRatio,
+              quality,
+              onProgress
+            );
+            if (mastered) return { url: mastered, model };
+          }
+        }
+      }
+    } catch (err: any) {
+      if (/401|403|404|not found|permission|quota/i.test(String(err?.message || err))) {
+        continue;
+      }
+    }
+  }
   return null;
 }
 
@@ -3041,11 +3111,13 @@ async function generateViaHfInferenceRouterVideo(
   if (!HF_ACCESS_TOKEN) return null;
 
   const client = new InferenceClient(HF_ACCESS_TOKEN);
-  const attempts: Array<{ model: string; provider: 'fal-ai' | 'wavespeed' }> = [
+  const attempts: Array<{ model: string; provider: 'fal-ai' | 'wavespeed' | 'replicate' | 'hf-inference' }> = [
     { model: WAN22_14B_T2V_MODEL, provider: 'fal-ai' },
     { model: WAN22_14B_T2V_MODEL, provider: 'wavespeed' },
+    { model: WAN22_14B_T2V_MODEL, provider: 'replicate' },
     { model: WAN21_14B_RCM_T2V_MODEL, provider: 'fal-ai' },
     { model: WAN21_BASE_T2V_MODEL, provider: 'fal-ai' },
+    { model: WAN21_BASE_T2V_MODEL, provider: 'hf-inference' },
   ];
 
   for (const attempt of attempts) {
@@ -3114,7 +3186,7 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
     const wanPrompt = buildWanTextToVideoPrompt(job.prompt, job.aspectRatio, job.duration, job.quality);
     updateProgress(6);
 
-    // 1. Try Hugging Face Inference Providers (fal-ai / wavespeed) first when HF_TOKEN supports it
+    // 1. Try Hugging Face Inference Providers (fal-ai / wavespeed / replicate) first when HF_TOKEN supports it
     const infVideo = await generateViaHfInferenceRouterVideo(
       wanPrompt,
       job.duration,
@@ -3131,7 +3203,25 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
       return;
     }
 
-    // 2. Try all verified RUNNING real Text-to-Video Spaces (Wan 2.2, LTX-2.5, LTX-2.3, LTX-Distilled, Wan 2.1)
+    // 2. Try Google Veo when GEMINI_API_KEY supports it
+    const veoVideo = await generateViaGeminiVeoVideo(
+      wanPrompt,
+      job.duration,
+      job.aspectRatio,
+      job.quality,
+      updateProgress
+    );
+    if (veoVideo) {
+      job.progress = 100;
+      job.status = 'completed';
+      job.videoUrl = veoVideo.url;
+      job.mastered = true;
+      job.model = veoVideo.model;
+      return;
+    }
+
+    // 3. Try verified RUNNING real Text-to-Video Spaces (fast-fail on consecutive ZeroGPU quota errors so client edge takes over cleanly)
+    let consecutiveQuotaErrors = 0;
     for (const tier of LIVE_VIDEO_SPACE_TIERS) {
       const result = await generateViaLiveSpaceTier(
         tier,
@@ -3142,13 +3232,21 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
         updateProgress,
         clientHfToken
       );
-      if (result) {
+      if (result && result.url) {
         job.progress = 100;
         job.status = 'completed';
         job.videoUrl = result.url;
         job.mastered = result.mastered;
         job.model = tier.model;
         return;
+      }
+      if (result?.quotaExceeded) {
+        consecutiveQuotaErrors += 1;
+        if (!(clientHfToken || HF_ACCESS_TOKEN) && consecutiveQuotaErrors >= 2) {
+          break;
+        }
+      } else {
+        consecutiveQuotaErrors = 0;
       }
     }
 
