@@ -596,9 +596,11 @@ export default function App() {
     }
   }, []);
 
-  // Keep outer document/body scroll pinned at (0, 0) so mobile browser UI or input focus never shifts the page
+  // Lock outer document scroll at (0, 0), shrink only on mobile virtual keyboard, and prevent page-level touch dragging on header/empty screen/prompt wrapper
   useLayoutEffect(() => {
-    const resetPageScroll = () => {
+    let touchStartY = 0;
+
+    const syncViewportLock = () => {
       if (window.scrollX !== 0 || window.scrollY !== 0) {
         window.scrollTo(0, 0);
       }
@@ -608,20 +610,87 @@ export default function App() {
       if (document.body.scrollTop !== 0) {
         document.body.scrollTop = 0;
       }
+      const vv = window.visualViewport;
+      if (vv && vv.height > 180 && vv.height < window.innerHeight - 40) {
+        document.documentElement.style.setProperty(
+          '--ios-kb-height',
+          `${Math.max(260, Math.round(vv.height))}px`
+        );
+      } else {
+        document.documentElement.style.removeProperty('--ios-kb-height');
+      }
     };
 
-    resetPageScroll();
-    window.addEventListener('scroll', resetPageScroll, { passive: true });
+    const handleFocusOut = () => {
+      syncViewportLock();
+      setTimeout(syncViewportLock, 60);
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        touchStartY = e.touches[0].clientY;
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 1) return;
+      const deltaY = e.touches[0].clientY - touchStartY;
+      let el = e.target as HTMLElement | null;
+
+      while (el && el !== document.body && el !== document.documentElement) {
+        const tag = el.tagName;
+        if (tag === 'INPUT' && (el as HTMLInputElement).type === 'range') {
+          return;
+        }
+        const style = window.getComputedStyle(el);
+        const canScrollY =
+          (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+          el.scrollHeight > el.clientHeight + 2;
+        const canScrollX =
+          (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
+          el.scrollWidth > el.clientWidth + 2;
+
+        if (canScrollY) {
+          const atTop = el.scrollTop <= 0;
+          const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+          if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
+            if (e.cancelable) e.preventDefault();
+          }
+          return;
+        }
+        if (canScrollX) {
+          return;
+        }
+        el = el.parentElement;
+      }
+
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    };
+
+    syncViewportLock();
+    window.addEventListener('scroll', syncViewportLock, { passive: true });
+    window.addEventListener('resize', syncViewportLock, { passive: true });
+    window.addEventListener('orientationchange', syncViewportLock, { passive: true });
+    window.addEventListener('focusout', handleFocusOut, { passive: true });
+    document.addEventListener('touchstart', handleTouchStart, { passive: true });
+    document.addEventListener('touchmove', handleTouchMove, { passive: false });
     const vv = window.visualViewport;
     if (vv) {
-      vv.addEventListener('scroll', resetPageScroll, { passive: true });
-      vv.addEventListener('resize', resetPageScroll, { passive: true });
+      vv.addEventListener('scroll', syncViewportLock, { passive: true });
+      vv.addEventListener('resize', syncViewportLock, { passive: true });
     }
     return () => {
-      window.removeEventListener('scroll', resetPageScroll);
+      window.removeEventListener('scroll', syncViewportLock);
+      window.removeEventListener('resize', syncViewportLock);
+      window.removeEventListener('orientationchange', syncViewportLock);
+      window.removeEventListener('focusout', handleFocusOut);
+      document.removeEventListener('touchstart', handleTouchStart);
+      document.removeEventListener('touchmove', handleTouchMove);
       if (vv) {
-        vv.removeEventListener('scroll', resetPageScroll);
-        vv.removeEventListener('resize', resetPageScroll);
+        vv.removeEventListener('scroll', syncViewportLock);
+        vv.removeEventListener('resize', syncViewportLock);
       }
     };
   }, []);
@@ -1873,20 +1942,22 @@ export default function App() {
           payloadData: unknown[],
           sseStartPct: number,
           sseEndPct: number,
-          hardTimeoutMs: number = 32000
+          hardTimeoutMs: number = 36000
         ): Promise<{ rawUrl: string | null; quotaExceeded: boolean }> => {
           try {
             const postRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ data: payloadData }),
-              signal: AbortSignal.timeout(10000),
+              signal: AbortSignal.timeout(12000),
             });
             if (!postRes.ok) {
               const errBody = await postRes.text().catch(() => '');
               return {
                 rawUrl: null,
-                quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(errBody),
+                quotaExceeded:
+                  postRes.status === 429 ||
+                  /ZeroGPU quota|exceeded your.*quota|quota|limit/i.test(errBody),
               };
             }
             const postJson = await postRes.json();
@@ -1898,7 +1969,7 @@ export default function App() {
             let sawActiveProgress = false;
             const initialActivityTimeout = setTimeout(() => {
               if (!sawActiveProgress) sseCtrl.abort();
-            }, 18000);
+            }, 26000);
 
             const sseRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}/${eventId}`, {
               signal: sseCtrl.signal,
@@ -1906,7 +1977,10 @@ export default function App() {
             if (!sseRes.ok || !sseRes.body) {
               clearTimeout(sseHardTimeout);
               clearTimeout(initialActivityTimeout);
-              return { rawUrl: null, quotaExceeded: false };
+              return {
+                rawUrl: null,
+                quotaExceeded: sseRes.status === 429,
+              };
             }
 
             const reader = sseRes.body.getReader();
@@ -1924,6 +1998,9 @@ export default function App() {
                   chunk.includes('"index"') ||
                   chunk.includes('generating') ||
                   chunk.includes('heartbeat') ||
+                  chunk.includes('process_starts') ||
+                  chunk.includes('estimation') ||
+                  chunk.includes('data:') ||
                   chunk.includes('event: complete')
                 ) {
                   sawActiveProgress = true;
@@ -1936,7 +2013,11 @@ export default function App() {
                   stepRatio = Math.max(stepRatio, Math.min(0.97, (stepIdx + 1) / stepLen));
                   const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
                   advanceVideoFloor(mapped);
-                } else if (chunk.includes('heartbeat') || chunk.includes('generating')) {
+                } else if (
+                  chunk.includes('heartbeat') ||
+                  chunk.includes('generating') ||
+                  chunk.includes('process_starts')
+                ) {
                   stepRatio = Math.min(0.92, stepRatio + 0.08);
                   const mapped = Math.round(sseStartPct + stepRatio * (sseEndPct - sseStartPct));
                   advanceVideoFloor(mapped);
@@ -1948,7 +2029,7 @@ export default function App() {
                   } catch {}
                   return {
                     rawUrl: null,
-                    quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+                    quotaExceeded: /ZeroGPU quota|exceeded your.*quota|quota/i.test(sseText),
                   };
                 }
               }
@@ -1969,7 +2050,8 @@ export default function App() {
 
             return {
               rawUrl: rawVideoUrl,
-              quotaExceeded: !rawVideoUrl && /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+              quotaExceeded:
+                !rawVideoUrl && /ZeroGPU quota|exceeded your.*quota|quota/i.test(sseText),
             };
           } catch {
             return { rawUrl: null, quotaExceeded: false };
@@ -2130,7 +2212,7 @@ export default function App() {
             {
               baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
               endpoint: '/generate',
-              payload: [wanPrompt, -1, 32, 25],
+              payload: [wanPrompt, -1, selectedDuration === 10 ? 64 : 40, 25],
               startPct: 16,
             },
             {
@@ -2158,7 +2240,7 @@ export default function App() {
                 upsamplerAspect,
                 4,
                 wanNeg,
-                4,
+                5,
                 1,
                 1,
                 Math.floor(Math.random() * 2147483647),
@@ -2184,7 +2266,7 @@ export default function App() {
                 null,
                 null,
                 16,
-                5,
+                selectedDuration === 10 ? 10 : 5,
                 selectedAspect === '9:16'
                   ? '9:16 (704×1280)'
                   : selectedAspect === '1:1'
@@ -2216,7 +2298,7 @@ export default function App() {
               payload: [
                 null,
                 wanPrompt,
-                5,
+                selectedDuration === 10 ? 10 : 5,
                 false,
                 Math.floor(Math.random() * 2147483647),
                 true,
@@ -2236,7 +2318,7 @@ export default function App() {
                 ltxDistH,
                 ltxDistW,
                 'text-to-video',
-                5,
+                selectedDuration === 10 ? 8.5 : 5,
                 9,
                 Math.floor(Math.random() * 2147483647),
                 true,
@@ -2314,10 +2396,10 @@ export default function App() {
             }
           };
 
-          const wave1Res = await raceTierWave(wave1Tiers, 28000);
+          const wave1Res = await raceTierWave(wave1Tiers, 36000);
           let winningRawUrl = wave1Res.rawUrl;
           if (!winningRawUrl && !wave1Res.allQuotaExceeded) {
-            const wave2Res = await raceTierWave(wave2Tiers, 26000);
+            const wave2Res = await raceTierWave(wave2Tiers, 32000);
             winningRawUrl = wave2Res.rawUrl;
           }
 
@@ -2563,7 +2645,7 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="relative h-dvh min-h-dvh max-h-dvh w-full text-[#e3e3e3] flex flex-col overflow-x-hidden overflow-y-hidden bg-[#191919] overscroll-none">
+    <div className="relative h-full min-h-full max-h-full w-full text-[#e3e3e3] flex flex-col overflow-x-hidden overflow-y-hidden bg-[#191919] overscroll-none">
       {/* Main Content — full browser width */}
       <div className="w-full flex-1 flex flex-col justify-between min-h-0 overflow-hidden relative">
           
@@ -3056,7 +3138,7 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="sticky bottom-0 shrink-0 w-full px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 bg-[#191919] touch-none">
+        <div className="sticky bottom-0 shrink-0 w-full px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 bg-[#191919] overscroll-none">
           <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}

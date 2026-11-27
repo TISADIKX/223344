@@ -496,6 +496,130 @@ function getTargetVideoDimensions(
   return table[aspectRatio][quality];
 }
 
+async function recordCanvasWithFallbackCodecs(
+  canvas: HTMLCanvasElement,
+  durationMs: number,
+  fps: number,
+  quality: VideoQuality,
+  renderAtElapsed: (elapsedMs: number) => void,
+  onProgress?: (pct: number) => void,
+  progressStart: number = 84
+): Promise<Blob | null> {
+  if (
+    typeof MediaRecorder === 'undefined' ||
+    typeof canvas.captureStream !== 'function'
+  ) {
+    return null;
+  }
+
+  // Prefer VP8/VP9 WebM before MP4 because avc1.42E01E (Level 3.0) rejects 720p/1080p on Chrome
+  const mimeCandidates = [
+    'video/webm;codecs=vp8',
+    'video/webm;codecs=vp9',
+    'video/webm',
+    'video/mp4',
+    '',
+  ].filter((m) => m === '' || MediaRecorder.isTypeSupported(m));
+
+  const bps = quality === '1080p' ? 5_500_000 : quality === '720p' ? 3_500_000 : 1_800_000;
+
+  for (const mimeType of mimeCandidates) {
+    let stream: MediaStream | null = null;
+    try {
+      stream = canvas.captureStream(fps);
+      const options: MediaRecorderOptions = mimeType
+        ? { mimeType, videoBitsPerSecond: bps }
+        : { videoBitsPerSecond: bps };
+
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, options);
+      } catch {
+        recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+      }
+
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+
+      const recordedPromise = new Promise<Blob>((resolve, reject) => {
+        recorder.onstop = () => {
+          const outType = (mimeType || recorder.mimeType || 'video/webm').split(';')[0];
+          resolve(new Blob(chunks, { type: outType }));
+        };
+        recorder.onerror = () => reject(new Error('MediaRecorder error'));
+      });
+
+      renderAtElapsed(0);
+      recorder.start(250);
+
+      const startWall = performance.now();
+      await new Promise<void>((resolve) => {
+        let timerId: ReturnType<typeof setTimeout> | null = null;
+        let rafId = 0;
+        let finished = false;
+
+        const finishLoop = () => {
+          if (finished) return;
+          finished = true;
+          if (timerId) clearTimeout(timerId);
+          if (rafId) cancelAnimationFrame(rafId);
+          resolve();
+        };
+
+        const step = () => {
+          if (finished) return;
+          const elapsed = performance.now() - startWall;
+          const clampedElapsed = Math.min(durationMs, Math.max(0, elapsed));
+          renderAtElapsed(clampedElapsed);
+          const ratio = durationMs > 0 ? clampedElapsed / durationMs : 1;
+          onProgress?.(Math.min(99, Math.round(progressStart + ratio * (99 - progressStart))));
+          if (elapsed >= durationMs) {
+            finishLoop();
+            return;
+          }
+          rafId = requestAnimationFrame(step);
+        };
+
+        // Heartbeat fallback timer in case background throttling pauses requestAnimationFrame
+        const bgTick = () => {
+          if (finished) return;
+          const elapsed = performance.now() - startWall;
+          if (elapsed >= durationMs) {
+            renderAtElapsed(durationMs);
+            finishLoop();
+            return;
+          }
+          timerId = setTimeout(bgTick, 120);
+        };
+
+        rafId = requestAnimationFrame(step);
+        timerId = setTimeout(bgTick, 120);
+      });
+
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+
+      const outBlob = await recordedPromise;
+      stream.getTracks().forEach((t) => t.stop());
+
+      if (outBlob.size >= 4000) {
+        return outBlob;
+      }
+    } catch {
+      try {
+        stream?.getTracks().forEach((t) => t.stop());
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
 export async function conformVideoToSettingsInBrowser(
   videoUrl: string,
   targetDuration: VideoDuration,
@@ -508,6 +632,8 @@ export async function conformVideoToSettingsInBrowser(
 
   let sourceBlobUrl: string | null = null;
   let shouldRevokeSource = false;
+  let videoEl: HTMLVideoElement | null = null;
+  const capturedFrames: HTMLCanvasElement[] = [];
 
   try {
     if (videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
@@ -522,13 +648,24 @@ export async function conformVideoToSettingsInBrowser(
     }
 
     const video = document.createElement('video');
+    videoEl = video;
     video.muted = true;
     video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
     video.preload = 'auto';
+    video.style.position = 'fixed';
+    video.style.left = '-9999px';
+    video.style.top = '-9999px';
+    video.style.width = '2px';
+    video.style.height = '2px';
+    video.style.opacity = '0.01';
+    video.style.pointerEvents = 'none';
+    document.body.appendChild(video);
     video.src = sourceBlobUrl;
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('video metadata timeout')), 12000);
+      const timer = setTimeout(() => reject(new Error('video metadata timeout')), 14000);
       video.onloadedmetadata = () => {
         clearTimeout(timer);
         resolve();
@@ -546,22 +683,13 @@ export async function conformVideoToSettingsInBrowser(
     const targetRatio = outW / outH;
     const actualRatio = vw > 0 && vh > 0 ? vw / vh : targetRatio;
     const durationMatches = rawDuration > 0 && Math.abs(rawDuration - targetDuration) <= 0.45;
-    const aspectMatches = Math.abs(actualRatio - targetRatio) <= 0.08;
+    const aspectMatches = Math.abs(actualRatio - targetRatio) <= 0.06;
     const qualityMatches = vw >= outW * 0.9 && vh >= outH * 0.9;
 
-    // If the server already mastered it or the raw clip already matches exact settings, return Blob URL immediately
+    // Return immediately ONLY when BOTH server mastered it OR exact duration, aspect ratio, AND resolution already match
     if ((serverMastered && durationMatches) || (durationMatches && aspectMatches && qualityMatches)) {
       shouldRevokeSource = false;
       onProgress?.(99);
-      return sourceBlobUrl;
-    }
-
-    if (
-      typeof MediaRecorder === 'undefined' ||
-      typeof HTMLCanvasElement === 'undefined' ||
-      typeof document.createElement('canvas').captureStream !== 'function'
-    ) {
-      shouldRevokeSource = false;
       return sourceBlobUrl;
     }
 
@@ -574,141 +702,167 @@ export async function conformVideoToSettingsInBrowser(
       return sourceBlobUrl;
     }
 
-    // Keep one previous-frame buffer for seamless crossfade across loop boundaries
-    const prevCanvas = document.createElement('canvas');
-    prevCanvas.width = outW;
-    prevCanvas.height = outH;
-    const prevCtx = prevCanvas.getContext('2d');
-
-    const drawCoverFrame = (targetCtx: CanvasRenderingContext2D) => {
-      const srcW = video.videoWidth || outW;
-      const srcH = video.videoHeight || outH;
-      const scale = Math.max(outW / srcW, outH / srcH);
+    const drawCoverSource = (
+      src: CanvasImageSource,
+      srcW: number,
+      srcH: number,
+      targetCtx: CanvasRenderingContext2D,
+      dstW: number,
+      dstH: number
+    ) => {
+      const scale = Math.max(dstW / Math.max(1, srcW), dstH / Math.max(1, srcH));
       const drawW = srcW * scale;
       const drawH = srcH * scale;
-      targetCtx.drawImage(video, (outW - drawW) / 2, (outH - drawH) / 2, drawW, drawH);
+      targetCtx.drawImage(src, (dstW - drawW) / 2, (dstH - drawH) / 2, drawW, drawH);
     };
 
-    const mimeCandidates = [
-      'video/mp4;codecs=avc1.42E01E',
-      'video/mp4',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8',
-      'video/webm',
-    ];
-    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-    const bps = quality === '1080p' ? 6_500_000 : quality === '720p' ? 4_000_000 : 2_200_000;
-
-    const stream = canvas.captureStream(30);
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: bps,
-    });
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
-
-    const recordedPromise = new Promise<Blob>((resolve, reject) => {
-      recorder.onstop = () => {
-        const outBlob = new Blob(chunks, { type: mimeType.split(';')[0] });
-        resolve(outBlob);
-      };
-      recorder.onerror = () => reject(new Error('MediaRecorder error'));
-    });
-
-    // If raw clip is within 1.4x of targetDuration, gently slow down playbackRate; otherwise keep smooth natural speed + seamless crossfade loops
-    const gentleRate =
-      rawDuration > 0 && rawDuration < targetDuration && rawDuration >= targetDuration * 0.7
-        ? Math.max(0.7, rawDuration / targetDuration)
-        : 1.0;
-
+    // Wait for first decoded frame ready
     video.currentTime = 0;
-    video.playbackRate = gentleRate;
-
-    // Wait for first frame ready before starting recorder
     await new Promise<void>((resolve) => {
       if (video.readyState >= 2) {
         resolve();
         return;
       }
-      const t = setTimeout(resolve, 1500);
+      const t = setTimeout(resolve, 2000);
       video.oncanplay = () => {
         clearTimeout(t);
         resolve();
       };
     });
 
-    drawCoverFrame(ctx);
-    recorder.start(250);
+    // Determine whether we need palindrome frame buffer (whenever raw clip is shorter than requested duration)
+    const needsExtension = rawDuration > 0.25 && rawDuration < targetDuration - 0.35;
+    const captureScale = Math.min(1, 768 / Math.max(outW, outH));
+    const capW = Math.max(240, Math.round((outW * captureScale) / 2) * 2);
+    const capH = Math.max(240, Math.round((outH * captureScale) / 2) * 2);
+    const maxCaptured = 64;
+    let lastCaptureTime = -1;
+    const minCaptureGap = needsExtension ? Math.max(0.04, rawDuration / maxCaptured) : 999;
+    let firstPassCompleted = false;
+
+    const gentleRate =
+      rawDuration > 0 && rawDuration < targetDuration && rawDuration >= targetDuration * 0.72
+        ? Math.max(0.72, rawDuration / targetDuration)
+        : 1.0;
+    video.playbackRate = needsExtension ? 1.0 : gentleRate;
     await video.play().catch(() => {});
 
     const targetMs = targetDuration * 1000;
-    const startWall = performance.now();
-    let crossfadeUntil = 0;
-    let isSeekingRestart = false;
-
-    await new Promise<void>((resolve) => {
-      const interval = setInterval(() => {
-        const elapsed = performance.now() - startWall;
-        const pct = Math.min(99, Math.round(85 + (elapsed / targetMs) * 14));
-        onProgress?.(pct);
-
-        if (elapsed >= targetMs) {
-          clearInterval(interval);
-          resolve();
+    const outBlob = await recordCanvasWithFallbackCodecs(
+      canvas,
+      targetMs,
+      30,
+      quality,
+      (elapsedMs) => {
+        if (needsExtension && firstPassCompleted && capturedFrames.length >= 2) {
+          // Smooth zero-glitch palindrome playback across all captured frames up to exact targetDuration
+          const postMs = Math.max(0, elapsedMs - rawDuration * 1000);
+          const cycleMs = Math.max(600, rawDuration * 1000);
+          const phase = (postMs / cycleMs) % 2;
+          const pingPongRatio = phase <= 1 ? phase : 2 - phase;
+          const exactIdx = pingPongRatio * (capturedFrames.length - 1);
+          const i0 = Math.min(capturedFrames.length - 1, Math.floor(exactIdx));
+          const i1 = Math.min(capturedFrames.length - 1, i0 + 1);
+          const mix = exactIdx - i0;
+          ctx.drawImage(capturedFrames[i0], 0, 0, outW, outH);
+          if (i1 !== i0 && mix > 0.05) {
+            ctx.save();
+            ctx.globalAlpha = mix;
+            ctx.drawImage(capturedFrames[i1], 0, 0, outW, outH);
+            ctx.restore();
+          }
           return;
         }
 
-        // Seamless loop before reaching raw end so there is zero freeze/stutter
-        if (
-          rawDuration > 0.6 &&
-          !isSeekingRestart &&
-          (video.ended || video.currentTime >= rawDuration - 0.12)
-        ) {
-          isSeekingRestart = true;
-          if (prevCtx) {
-            prevCtx.clearRect(0, 0, outW, outH);
-            prevCtx.drawImage(canvas, 0, 0);
-            crossfadeUntil = performance.now() + 360;
+        const curT = video.currentTime || 0;
+        const srcW = video.videoWidth || outW;
+        const srcH = video.videoHeight || outH;
+        drawCoverSource(video, srcW, srcH, ctx, outW, outH);
+
+        if (needsExtension && !firstPassCompleted) {
+          if (
+            capturedFrames.length < maxCaptured &&
+            (lastCaptureTime < 0 || curT - lastCaptureTime >= minCaptureGap)
+          ) {
+            const snap = document.createElement('canvas');
+            snap.width = capW;
+            snap.height = capH;
+            const sCtx = snap.getContext('2d');
+            if (sCtx) {
+              drawCoverSource(video, srcW, srcH, sCtx, capW, capH);
+              capturedFrames.push(snap);
+              lastCaptureTime = curT;
+            }
           }
+          if (video.ended || curT >= rawDuration - 0.08) {
+            if (capturedFrames.length >= 2) {
+              firstPassCompleted = true;
+              video.pause();
+            } else {
+              video.currentTime = 0;
+              video.play().catch(() => {});
+            }
+          }
+        } else if (!needsExtension && (video.ended || (rawDuration > 0.5 && curT >= rawDuration - 0.08))) {
           video.currentTime = 0;
           video.play().catch(() => {});
-          setTimeout(() => {
-            isSeekingRestart = false;
-          }, 180);
         }
-
-        drawCoverFrame(ctx);
-        if (prevCtx && crossfadeUntil > performance.now()) {
-          const alpha = Math.max(0, Math.min(1, (crossfadeUntil - performance.now()) / 360));
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          ctx.drawImage(prevCanvas, 0, 0);
-          ctx.restore();
-        }
-      }, 33);
-    });
+      },
+      onProgress,
+      85
+    );
 
     video.pause();
-    if (recorder.state !== 'inactive') {
-      recorder.stop();
+
+    if (outBlob && outBlob.size >= 4000) {
+      if (shouldRevokeSource && sourceBlobUrl) {
+        URL.revokeObjectURL(sourceBlobUrl);
+      }
+      onProgress?.(99);
+      return URL.createObjectURL(outBlob);
     }
 
-    const outBlob = await recordedPromise;
-    stream.getTracks().forEach((t) => t.stop());
-
     if (shouldRevokeSource && sourceBlobUrl) {
-      URL.revokeObjectURL(sourceBlobUrl);
-    }
-
-    if (outBlob.size < 4000) return null;
-    onProgress?.(99);
-    return URL.createObjectURL(outBlob);
-  } catch {
-    if (shouldRevokeSource && sourceBlobUrl) {
+      shouldRevokeSource = false;
       return sourceBlobUrl;
     }
+    return null;
+  } catch {
+    if (shouldRevokeSource && sourceBlobUrl) {
+      shouldRevokeSource = false;
+      return sourceBlobUrl;
+    }
+    return null;
+  } finally {
+    capturedFrames.length = 0;
+    if (videoEl) {
+      try {
+        videoEl.pause();
+        videoEl.src = '';
+        videoEl.remove();
+      } catch {}
+    }
+  }
+}
+
+async function fetchPollinationsFrameUrl(
+  prompt: string,
+  width: number,
+  height: number,
+  seed: number
+): Promise<string | null> {
+  try {
+    const safeW = Math.min(1280, Math.max(384, Math.round(width / 16) * 16));
+    const safeH = Math.min(1280, Math.max(384, Math.round(height / 16) * 16));
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+      prompt
+    )}?width=${safeW}&height=${safeH}&nologo=true&seed=${seed}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(22000) });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob.type.startsWith('image/') || blob.size < 4000) return null;
+    return await blobToDataUrl(blob);
+  } catch {
     return null;
   }
 }
@@ -734,7 +888,7 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
   const [outW, outH] = getTargetVideoDimensions(aspectRatio, quality);
 
   const sceneCues = [
-    `${baseScene}, opening establishing wide-angle cinema shot, natural motion beginning, crisp 35mm photography`,
+    `${baseScene}, opening establishing cinema shot, natural motion beginning, crisp 35mm photography`,
     `${baseScene}, dynamic mid-action cinematic frame, natural subject movement and shifting light, crisp 35mm photography`,
     `${baseScene}, atmospheric closing motion frame, cinematic depth of field, crisp 35mm photography`,
   ];
@@ -744,8 +898,10 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
   const loadBitmap = (url: string): Promise<HTMLImageElement | null> =>
     new Promise((resolve) => {
       const img = new Image();
-      img.crossOrigin = 'anonymous';
-      const t = setTimeout(() => resolve(null), 10000);
+      if (!url.startsWith('data:') && !url.startsWith('blob:') && !url.startsWith('/')) {
+        img.crossOrigin = 'anonymous';
+      }
+      const t = setTimeout(() => resolve(null), 12000);
       img.onload = () => {
         clearTimeout(t);
         resolve(img.naturalWidth > 0 ? img : null);
@@ -757,24 +913,51 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
       img.src = url;
     });
 
+  // Fetch up to 3 distinct keyframes from 3 completely independent backends (no shared IP rate-limit collisions)
   const framePromises: Array<Promise<HTMLImageElement | null>> = [
+    // 1. Direct browser HF FLUX / Z-Image / single AI Horde slot
     Promise.race([
       generatePhotoDirectlyInBrowser(sceneCues[0], photoAspect, 'hd').then((u) =>
         u ? loadBitmap(u) : null
       ),
-      new Promise<null>((r) => setTimeout(() => r(null), 28000)),
+      new Promise<null>((r) => setTimeout(() => r(null), 32000)),
     ]),
+    // 2. Single clean Pollinations request
     Promise.race([
-      submitAiHordePhotoInBrowser(sceneCues[1], photoAspect).then((u) =>
-        u ? loadBitmap(u) : null
-      ),
-      new Promise<null>((r) => setTimeout(() => r(null), 28000)),
+      fetchPollinationsFrameUrl(
+        sceneCues[1],
+        outW > outH ? 896 : outH > outW ? 512 : 768,
+        outH > outW ? 896 : outW > outH ? 512 : 768,
+        Math.floor(Math.random() * 999999) + 101
+      ).then((u) => (u ? loadBitmap(u) : null)),
+      new Promise<null>((r) => setTimeout(() => r(null), 26000)),
     ]),
+    // 3. Server /api/generate-image (uses Gemini / Xkiro / server providers)
     Promise.race([
-      submitAiHordePhotoInBrowser(sceneCues[2], photoAspect).then((u) =>
-        u ? loadBitmap(u) : null
-      ),
-      new Promise<null>((r) => setTimeout(() => r(null), 28000)),
+      fetch('/api/generate-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: sceneCues[2],
+          aspectRatio: photoAspect,
+          quality: 'hd',
+        }),
+        signal: AbortSignal.timeout(26000),
+      })
+        .then(async (r) => {
+          if (!r.ok) return null;
+          const j = await r.json().catch(() => null);
+          if (typeof j?.imageUrl === 'string' && j.imageUrl) {
+            return await loadBitmap(j.imageUrl);
+          }
+          if (typeof j?.hordeJobId === 'string' && j.hordeJobId) {
+            const hUrl = await pollAiHordeImageInBrowser(j.hordeJobId, 28000);
+            return hUrl ? await loadBitmap(hUrl) : null;
+          }
+          return null;
+        })
+        .catch(() => null),
+      new Promise<null>((r) => setTimeout(() => r(null), 30000)),
     ]),
   ];
 
@@ -783,13 +966,29 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
     framePromises.map((p) =>
       p.then((img) => {
         completedCount += 1;
-        onProgress?.(Math.min(78, 50 + completedCount * 9));
+        onProgress?.(Math.min(79, 52 + completedCount * 9));
         return img;
       })
     )
   );
 
-  const frames = loadedFramesRaw.filter((img): img is HTMLImageElement => Boolean(img));
+  let frames = loadedFramesRaw.filter((img): img is HTMLImageElement => Boolean(img));
+
+  // Last-resort single retry if all 3 timed out simultaneously on weak mobile network
+  if (frames.length === 0) {
+    const retryUrl =
+      (await fetchPollinationsFrameUrl(
+        sceneCues[0],
+        outW > outH ? 896 : outH > outW ? 512 : 768,
+        outH > outW ? 896 : outW > outH ? 512 : 768,
+        Math.floor(Math.random() * 999999) + 777
+      )) || (await submitAiHordePhotoInBrowser(sceneCues[0], photoAspect));
+    if (retryUrl) {
+      const retryImg = await loadBitmap(retryUrl);
+      if (retryImg) frames = [retryImg];
+    }
+  }
+
   if (frames.length === 0) {
     return null;
   }
@@ -802,31 +1001,6 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
     canvas.height = outH;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-
-    const mimeCandidates = [
-      'video/mp4;codecs=avc1.42E01E',
-      'video/mp4',
-      'video/webm;codecs=vp9',
-      'video/webm;codecs=vp8',
-      'video/webm',
-    ];
-    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-    const bps = quality === '1080p' ? 6_500_000 : quality === '720p' ? 4_000_000 : 2_200_000;
-
-    const stream = canvas.captureStream(30);
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: bps,
-    });
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
-
-    const recordedPromise = new Promise<Blob>((resolve, reject) => {
-      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType.split(';')[0] }));
-      recorder.onerror = () => reject(new Error('MediaRecorder error'));
-    });
 
     const drawMotionFrame = (
       img: HTMLImageElement,
@@ -850,73 +1024,58 @@ export async function generateMultiKeyframeMotionVideoInBrowser(
       ctx.restore();
     };
 
-    const renderAtProgress = (tNorm: number) => {
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, outW, outH);
-
-      if (frames.length === 1) {
-        const zoom = 1.04 + 0.08 * tNorm;
-        const panX = Math.sin(tNorm * Math.PI) * 0.5;
-        const panY = (tNorm - 0.5) * 0.35;
-        drawMotionFrame(frames[0], zoom, panX, panY, 1);
-        return;
-      }
-
-      const scaled = tNorm * (frames.length - 1);
-      const idx = Math.min(frames.length - 2, Math.floor(scaled));
-      const localT = scaled - idx;
-      const smoothMix = localT * localT * (3 - 2 * localT);
-      const dir = idx % 2 === 0 ? 1 : -1;
-
-      drawMotionFrame(
-        frames[idx],
-        1.05 + 0.07 * localT,
-        dir * (localT - 0.5) * 0.55,
-        (localT - 0.5) * 0.25,
-        1
-      );
-      if (smoothMix > 0.01) {
-        drawMotionFrame(
-          frames[idx + 1],
-          1.05 + 0.07 * (1 - localT),
-          -dir * (localT - 0.5) * 0.55,
-          (0.5 - localT) * 0.25,
-          smoothMix
-        );
-      }
-    };
-
-    renderAtProgress(0);
-    recorder.start(250);
-
     const targetMs = targetDuration * 1000;
-    const startWall = performance.now();
+    const outBlob = await recordCanvasWithFallbackCodecs(
+      canvas,
+      targetMs,
+      30,
+      quality,
+      (elapsedMs) => {
+        const tNorm = Math.min(1, Math.max(0, elapsedMs / targetMs));
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, outW, outH);
 
-    await new Promise<void>((resolve) => {
-      const interval = setInterval(() => {
-        const elapsed = performance.now() - startWall;
-        const tNorm = Math.min(1, Math.max(0, elapsed / targetMs));
-        renderAtProgress(tNorm);
-        onProgress?.(Math.min(99, Math.round(83 + tNorm * 16)));
-        if (elapsed >= targetMs) {
-          clearInterval(interval);
-          resolve();
+        if (frames.length === 1) {
+          const zoom = 1.04 + 0.08 * tNorm;
+          const panX = Math.sin(tNorm * Math.PI) * 0.5;
+          const panY = (tNorm - 0.5) * 0.35;
+          drawMotionFrame(frames[0], zoom, panX, panY, 1);
+          return;
         }
-      }, 33);
-    });
 
-    if (recorder.state !== 'inactive') {
-      recorder.stop();
-    }
+        const scaled = tNorm * (frames.length - 1);
+        const idx = Math.min(frames.length - 2, Math.floor(scaled));
+        const localT = scaled - idx;
+        const smoothMix = localT * localT * (3 - 2 * localT);
+        const dir = idx % 2 === 0 ? 1 : -1;
 
-    const outBlob = await recordedPromise;
-    stream.getTracks().forEach((t) => t.stop());
+        drawMotionFrame(
+          frames[idx],
+          1.05 + 0.07 * localT,
+          dir * (localT - 0.5) * 0.55,
+          (localT - 0.5) * 0.25,
+          1
+        );
+        if (smoothMix > 0.01) {
+          drawMotionFrame(
+            frames[idx + 1],
+            1.05 + 0.07 * (1 - localT),
+            -dir * (localT - 0.5) * 0.55,
+            (0.5 - localT) * 0.25,
+            smoothMix
+          );
+        }
+      },
+      onProgress,
+      83
+    );
 
-    if (outBlob.size < 4000) return null;
+    if (!outBlob || outBlob.size < 4000) return null;
     onProgress?.(99);
     return URL.createObjectURL(outBlob);
   } catch {
     return null;
   }
 }
+
 

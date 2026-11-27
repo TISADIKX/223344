@@ -2712,10 +2712,10 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 30000,
     startPct: 10,
     endPct: 80,
-    buildPayload: (wanPrompt) => [
+    buildPayload: (wanPrompt, _aspectRatio, duration) => [
       wanPrompt,
       -1,
-      32,
+      duration === 10 ? 64 : 40,
       25,
     ],
   },
@@ -2766,7 +2766,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         arChoice,
         4,
         WAN_NEGATIVE_PROMPT,
-        4,
+        5,
         1,
         1,
         Math.floor(Math.random() * 2147483647),
@@ -2781,14 +2781,14 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 38000,
     startPct: 18,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => [
+    buildPayload: (wanPrompt, aspectRatio, duration) => [
       wanPrompt,
       '',
       null,
       null,
       null,
       16,
-      4,
+      duration === 10 ? 10 : 5,
       aspectRatio === '9:16'
         ? '9:16 (704×1280)'
         : aspectRatio === '1:1'
@@ -2831,7 +2831,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 38000,
     startPct: 22,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [768, 512]
@@ -2841,7 +2841,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
       return [
         null,
         wanPrompt,
-        5,
+        duration === 10 ? 10 : 5,
         false,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2857,7 +2857,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 38000,
     startPct: 24,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [704, 512]
@@ -2872,7 +2872,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         h,
         w,
         'text-to-video',
-        5,
+        duration === 10 ? 8.5 : 5,
         9,
         Math.floor(Math.random() * 2147483647),
         true,

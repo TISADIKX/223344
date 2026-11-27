@@ -2432,10 +2432,10 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/generate',
     startPct: 12,
     endPct: 92,
-    buildPayload: (wanPrompt) => [
+    buildPayload: (wanPrompt, _aspectRatio, duration) => [
       wanPrompt,
       -1,
-      32,
+      duration === 10 ? 64 : 40,
       25,
     ],
   },
@@ -2484,7 +2484,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         arChoice,
         4,
         WAN_NEGATIVE_PROMPT,
-        4,
+        5,
         1,
         1,
         Math.floor(Math.random() * 2147483647),
@@ -2498,14 +2498,14 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/infer_fn',
     startPct: 20,
     endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => [
+    buildPayload: (wanPrompt, aspectRatio, duration) => [
       wanPrompt,
       '',
       null,
       null,
       null,
       16,
-      5,
+      duration === 10 ? 10 : 5,
       aspectRatio === '9:16'
         ? '9:16 (704×1280)'
         : aspectRatio === '1:1'
@@ -2546,7 +2546,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/generate_video',
     startPct: 24,
     endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [768, 512]
@@ -2556,7 +2556,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
       return [
         null,
         wanPrompt,
-        5,
+        duration === 10 ? 10 : 5,
         false,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2571,7 +2571,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/text_to_video',
     startPct: 26,
     endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [704, 512]
@@ -2586,7 +2586,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         h,
         w,
         'text-to-video',
-        5,
+        duration === 10 ? 8.5 : 5,
         9,
         Math.floor(Math.random() * 2147483647),
         true,
