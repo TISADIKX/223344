@@ -589,50 +589,39 @@ export default function App() {
     }
   }, [inputText]);
 
-  // Focus prompt input on mount
+  // Focus prompt input on mount on desktop pointers only (avoid triggering mobile scroll/keyboard shift on load)
   useEffect(() => {
-    textareaRef.current?.focus();
+    if (typeof window !== 'undefined' && window.matchMedia?.('(pointer: fine)').matches) {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
   }, []);
 
-  // Keep outer document/viewport pinned to exact visualViewport height/offset so Android Chrome never shifts up/down
+  // Keep outer document/body scroll pinned at (0, 0) so mobile browser UI or input focus never shifts the page
   useLayoutEffect(() => {
-    const syncViewportMetrics = () => {
-      const vv = window.visualViewport;
-      const root = document.documentElement;
-      if (vv) {
-        root.style.setProperty('--app-height', `${Math.max(320, Math.round(vv.height))}px`);
-        root.style.setProperty('--app-offset-top', `${Math.max(0, Math.round(vv.offsetTop))}px`);
-      } else {
-        root.style.setProperty('--app-height', `${Math.max(320, window.innerHeight)}px`);
-        root.style.setProperty('--app-offset-top', '0px');
-      }
+    const resetPageScroll = () => {
       if (window.scrollX !== 0 || window.scrollY !== 0) {
         window.scrollTo(0, 0);
       }
-      if (root.scrollTop !== 0) {
-        root.scrollTop = 0;
+      if (document.documentElement.scrollTop !== 0) {
+        document.documentElement.scrollTop = 0;
       }
       if (document.body.scrollTop !== 0) {
         document.body.scrollTop = 0;
       }
     };
 
-    syncViewportMetrics();
-    window.addEventListener('scroll', syncViewportMetrics, { passive: true });
-    window.addEventListener('resize', syncViewportMetrics, { passive: true });
-    window.addEventListener('orientationchange', syncViewportMetrics, { passive: true });
+    resetPageScroll();
+    window.addEventListener('scroll', resetPageScroll, { passive: true });
     const vv = window.visualViewport;
     if (vv) {
-      vv.addEventListener('scroll', syncViewportMetrics, { passive: true });
-      vv.addEventListener('resize', syncViewportMetrics, { passive: true });
+      vv.addEventListener('scroll', resetPageScroll, { passive: true });
+      vv.addEventListener('resize', resetPageScroll, { passive: true });
     }
     return () => {
-      window.removeEventListener('scroll', syncViewportMetrics);
-      window.removeEventListener('resize', syncViewportMetrics);
-      window.removeEventListener('orientationchange', syncViewportMetrics);
+      window.removeEventListener('scroll', resetPageScroll);
       if (vv) {
-        vv.removeEventListener('scroll', syncViewportMetrics);
-        vv.removeEventListener('resize', syncViewportMetrics);
+        vv.removeEventListener('scroll', resetPageScroll);
+        vv.removeEventListener('resize', resetPageScroll);
       }
     };
   }, []);
@@ -1337,7 +1326,9 @@ export default function App() {
     setPendingMode(null);
     setVideoProgress(0);
     setTimeout(() => {
-      textareaRef.current?.focus();
+      if (typeof window !== 'undefined' && window.matchMedia?.('(pointer: fine)').matches) {
+        textareaRef.current?.focus({ preventScroll: true });
+      }
     }, 50);
   };
 
@@ -2572,16 +2563,16 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="fixed left-0 right-0 top-[var(--app-offset-top,0px)] h-[var(--app-height,100dvh)] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] overscroll-none">
+    <div className="relative h-dvh min-h-dvh max-h-dvh w-full text-[#e3e3e3] flex flex-col overflow-x-hidden overflow-y-hidden bg-[#191919] overscroll-none">
       {/* Main Content — full browser width */}
-      <div className="w-full flex-1 flex flex-col justify-between h-full min-h-0 relative">
+      <div className="w-full flex-1 flex flex-col justify-between min-h-0 overflow-hidden relative">
           
           {/* Top Header */}
           <motion.header
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 bg-[#191919] touch-none"
+            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 sticky top-0 bg-[#191919] touch-none"
           >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
               <motion.button 
@@ -2691,7 +2682,7 @@ export default function App() {
           className={`flex-1 min-h-0 w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10 ${
             messages.length === 0 && !isThinking
               ? 'overflow-hidden touch-none'
-              : 'overflow-y-auto overscroll-y-contain touch-pan-y'
+              : 'overflow-y-auto overflow-x-hidden overscroll-y-contain touch-pan-y'
           }`}
         >
           {messages.length === 0 && !isThinking ? (
@@ -3065,7 +3056,7 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0 bg-[#191919] touch-none">
+        <div className="sticky bottom-0 shrink-0 w-full px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 bg-[#191919] touch-none">
           <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}
@@ -3248,7 +3239,7 @@ export default function App() {
               onClick={(e) => {
                 const target = e.target as HTMLElement;
                 if (!target.closest('button') && !target.closest('#upload-menu') && !target.closest('#mode-menu')) {
-                  textareaRef.current?.focus();
+                  textareaRef.current?.focus({ preventScroll: true });
                 }
               }}
             >

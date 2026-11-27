@@ -42,7 +42,7 @@ export class ErrorBoundary extends React.Component<
       }
 
       return (
-        <div className="min-h-screen w-full bg-[#191919] text-[#e3e3e3] flex items-center justify-center p-4">
+        <div className="min-h-dvh w-full bg-[#191919] text-[#e3e3e3] flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-[#252525] border border-white/10 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
             <div className="w-11 h-11 rounded-2xl bg-red-500/10 border border-red-500/25 flex items-center justify-center mx-auto text-red-400">
               <span className="material-symbols-outlined text-[22px]">error</span>
