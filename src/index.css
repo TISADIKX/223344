@@ -5,10 +5,23 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background-color: #191919;
+}
+
 body {
   font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background-color: #191919;
-  overflow-x: hidden;
+}
+
+#chat-canvas {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .material-symbols-outlined {

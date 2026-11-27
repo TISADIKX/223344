@@ -45,6 +45,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       status: 'completed',
       progress: 100,
       videoUrl: rawVideoUrl,
+      mastered: false,
       duration,
       aspectRatio,
       quality,

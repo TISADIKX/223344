@@ -2198,6 +2198,7 @@ interface VideoJobState {
   aspectRatio: VideoAspectOption;
   quality: VideoQualityOption;
   videoUrl?: string;
+  mastered?: boolean;
   model?: string;
   error?: string;
   createdAt: number;
@@ -2273,7 +2274,12 @@ function getVideoResolutionConfig(
 }
 
 // Build a clean cinematic prompt tailored for Wan 2.2 / Wan 2.1 Text-to-Video
-function buildWanTextToVideoPrompt(rawPrompt: string, aspectRatio: VideoAspectOption): string {
+function buildWanTextToVideoPrompt(
+  rawPrompt: string,
+  aspectRatio: VideoAspectOption,
+  duration: 5 | 10 = 10,
+  quality: VideoQualityOption = '720p'
+): string {
   const cleanedRaw =
     rawPrompt
       .replace(
@@ -2289,7 +2295,19 @@ function buildWanTextToVideoPrompt(rawPrompt: string, aspectRatio: VideoAspectOp
       ? 'Cinematic real-world 1:1 live-action video of'
       : 'Cinematic real-world 16:9 widescreen live-action video of';
 
-  return `${framingText} ${cleanedRaw}, fluid natural 3D motion, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, rich detail, sharp optical focus.`;
+  const pacingText =
+    duration === 10
+      ? 'unhurried continuous 10-second tracking sequence'
+      : 'smooth continuous 5-second sequence';
+
+  const clarityText =
+    quality === '1080p'
+      ? 'ultra-sharp 1080p cinema clarity, rich fine texture'
+      : quality === '480p'
+      ? 'clean optical focus, balanced cinema lighting'
+      : 'sharp HD optical focus, rich detail';
+
+  return `${framingText} ${cleanedRaw}, ${pacingText}, fluid natural 3D motion, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, ${clarityText}.`;
 }
 
 // Probe raw Wan clip timing (e.g. 81 frames @ 16fps = 5.0625s or 120 frames @ 24fps = 5.0s)
@@ -2386,7 +2404,7 @@ function runFfmpegWithProgress(
   });
 }
 
-// Lag-free 30fps EPZS optical-flow mastering tailored for 5s and 10s Wan clips (single continuous silent clip, -an)
+// Fast, reliable 30fps mastering tailored to exact 5s or 10s duration, aspect ratio, and 480p/720p/1080p quality
 async function masterWanVideoSmooth(
   rawVideoBuffer: Buffer,
   targetSeconds: 5 | 10,
@@ -2400,7 +2418,7 @@ async function masterWanVideoSmooth(
 
   const targetFps = 30;
   const targetFrames = Math.round(targetSeconds * targetFps);
-  const { outW, outH, workW, workH, crf, maxrate, bufsize } = getVideoResolutionConfig(
+  const { outW, outH, crf, maxrate, bufsize } = getVideoResolutionConfig(
     aspectRatio,
     quality,
     targetSeconds
@@ -2408,30 +2426,54 @@ async function masterWanVideoSmooth(
 
   try {
     await fs.promises.writeFile(inPath, rawVideoBuffer);
-    const { rawDuration, nbFrames, rawFps } = await probeVideoTiming(inPath);
-
-    const effectiveSpan =
-      nbFrames > 4 && rawFps > 0
-        ? Math.max(0.8, (nbFrames - 2) / rawFps)
-        : Math.max(0.8, rawDuration - 2 / Math.max(rawFps, 16));
-
-    const needsTimeExpansion = targetSeconds > rawDuration + 0.18;
-    const ptsScaleNum = needsTimeExpansion ? (targetSeconds + 0.32) / effectiveSpan : 1.0;
-    const ptsPrefix = needsTimeExpansion ? `setpts=${ptsScaleNum.toFixed(5)}*PTS,` : '';
-    const unsharpStrength = quality === '1080p' ? '0.32' : '0.26';
-
-    // If raw clip is already >=23fps and covers the target 5s duration natively, preserve full native resolution directly
-    const vfFilter =
-      rawFps >= 23 && !needsTimeExpansion
-        ? `framerate=fps=${targetFps}:interp_start=0:interp_end=255:scene=8.2,` +
-          `scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},` +
-          `unsharp=5:5:${unsharpStrength}:5:5:0.0,format=yuv420p`
-        : `${ptsPrefix}` +
-          `scale=${workW}:${workH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${workW}:${workH},` +
-          `minterpolate=fps=${targetFps}:mi_mode=mci:mc_mode=obmc:me_mode=bilat:me=epzs:vsbmc=0:mb_size=16:search_param=32:scd=fdiff:scd_threshold=10,` +
-          `scale=${outW}:${outH}:flags=lanczos,unsharp=5:5:${unsharpStrength}:5:5:0.0,format=yuv420p`;
+    const { rawDuration } = await probeVideoTiming(inPath);
+    const safeRawDur = Number.isFinite(rawDuration) && rawDuration > 0.3 ? rawDuration : 2.5;
+    const unsharpStrength = quality === '1080p' ? '0.32' : quality === '720p' ? '0.26' : '0.18';
 
     onProgress?.(78);
+
+    let filterComplexArgs: string[];
+    if (safeRawDur >= targetSeconds - 0.15) {
+      // Source clip already covers targetSeconds: smooth 30fps interpolation + Lanczos upscale/crop + exact trim
+      filterComplexArgs = [
+        '-vf',
+        `framerate=fps=${targetFps}:interp_start=0:interp_end=255:scene=8.2,` +
+          `scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},` +
+          `unsharp=5:5:${unsharpStrength}:5:5:0.0,format=yuv420p`,
+      ];
+    } else if (safeRawDur >= targetSeconds * 0.72) {
+      // Gentle speed alignment (at most ~1.38x) + 30fps framerate blending
+      const ptsScale = targetSeconds / safeRawDur;
+      filterComplexArgs = [
+        '-vf',
+        `setpts=${ptsScale.toFixed(5)}*PTS,` +
+          `framerate=fps=${targetFps}:interp_start=0:interp_end=255:scene=8.2,` +
+          `scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},` +
+          `unsharp=5:5:${unsharpStrength}:5:5:0.0,format=yuv420p`,
+      ];
+    } else {
+      // Seamless forward+reverse palindrome loop at native resolution first (low RAM, ~2s encode), then 30fps + Lanczos scale/crop
+      const cycleDur = safeRawDur * 2;
+      const repeats = Math.max(1, Math.min(8, Math.ceil((targetSeconds + 0.3) / cycleDur)));
+      const splitLabels = Array.from({ length: repeats }, (_, idx) => `[c${idx}]`).join('');
+      const concatInputs = Array.from({ length: repeats }, (_, idx) => `[c${idx}]`).join('');
+
+      const filterGraph =
+        repeats === 1
+          ? `[0:v]fps=${targetFps},split=2[f0][r0src];` +
+            `[r0src]reverse[r0];` +
+            `[f0][r0]concat=n=2:v=1:a=0,` +
+            `scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},` +
+            `unsharp=5:5:${unsharpStrength}:5:5:0.0,trim=duration=${targetSeconds},setpts=PTS-STARTPTS,format=yuv420p[vout]`
+          : `[0:v]fps=${targetFps},split=2[f0][r0src];` +
+            `[r0src]reverse[r0];` +
+            `[f0][r0]concat=n=2:v=1:a=0,split=${repeats}${splitLabels};` +
+            `${concatInputs}concat=n=${repeats}:v=1:a=0,` +
+            `scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},` +
+            `unsharp=5:5:${unsharpStrength}:5:5:0.0,trim=duration=${targetSeconds},setpts=PTS-STARTPTS,format=yuv420p[vout]`;
+
+      filterComplexArgs = ['-filter_complex', filterGraph, '-map', '[vout]'];
+    }
 
     const args = [
       '-y',
@@ -2442,8 +2484,7 @@ async function masterWanVideoSmooth(
       '0',
       '-i',
       inPath,
-      '-vf',
-      vfFilter,
+      ...filterComplexArgs,
       '-an',
       '-frames:v',
       String(targetFrames),
@@ -2491,12 +2532,11 @@ async function masterWanVideoSmooth(
       return `/api/videos/${fileId}.mp4`;
     }
   } catch (err: any) {
-    console.warn('Wan EPZS mastering fallback:', err?.message || err);
+    console.warn('Wan mastering fallback:', err?.message || err);
     try {
-      const { rawDuration, nbFrames, rawFps } = await probeVideoTiming(inPath);
-      const effectiveSpan =
-        nbFrames > 4 && rawFps > 0 ? Math.max(0.8, (nbFrames - 2) / rawFps) : Math.max(0.8, rawDuration);
-      const ptsScaleNum = targetSeconds > rawDuration + 0.18 ? (targetSeconds + 0.32) / effectiveSpan : 1.0;
+      const { rawDuration } = await probeVideoTiming(inPath);
+      const safeRawDur = Number.isFinite(rawDuration) && rawDuration > 0.3 ? rawDuration : 2.5;
+      const loopCount = Math.max(0, Math.ceil((targetSeconds + 0.5) / safeRawDur) - 1);
       const fallbackArgs = [
         '-y',
         '-hide_banner',
@@ -2504,10 +2544,11 @@ async function masterWanVideoSmooth(
         'error',
         '-threads',
         '0',
+        ...(loopCount > 0 ? ['-stream_loop', String(loopCount)] : []),
         '-i',
         inPath,
         '-vf',
-        `setpts=${ptsScaleNum.toFixed(5)}*PTS,framerate=fps=${targetFps}:interp_start=0:interp_end=255:scene=8.2,scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},format=yuv420p`,
+        `fps=${targetFps},scale=${outW}:${outH}:force_original_aspect_ratio=increase:flags=lanczos,crop=${outW}:${outH},format=yuv420p`,
         '-an',
         '-frames:v',
         String(targetFrames),
@@ -2520,7 +2561,7 @@ async function masterWanVideoSmooth(
         '-profile:v',
         'high',
         '-preset',
-        'veryfast',
+        'ultrafast',
         '-crf',
         String(crf),
         '-maxrate',
@@ -2561,7 +2602,7 @@ async function fetchAndMasterWanClip(
   aspectRatio: VideoAspectOption,
   quality: VideoQualityOption,
   onProgress?: (pct: number) => void
-): Promise<string | null> {
+): Promise<{ url: string; mastered: boolean } | null> {
   try {
     onProgress?.(82);
     const vidRes = await fetch(videoUrl, {
@@ -2573,14 +2614,14 @@ async function fetchAndMasterWanClip(
     if (buf.length < 8000) return null;
     onProgress?.(84);
     const mastered = await masterWanVideoSmooth(buf, targetSeconds, aspectRatio, quality, onProgress);
-    if (mastered) return mastered;
+    if (mastered) return { url: mastered, mastered: true };
 
     // Never discard an already-generated AI video if FFmpeg mastering failed or timed out
     const rawId = `vid_raw_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const rawOutPath = path.join(GENERATED_VIDEOS_DIR, `${rawId}.mp4`);
     await fs.promises.writeFile(rawOutPath, buf);
     onProgress?.(100);
-    return `/api/videos/${rawId}.mp4`;
+    return { url: `/api/videos/${rawId}.mp4`, mastered: false };
   } catch {
     return null;
   }
@@ -2655,7 +2696,12 @@ interface LiveVideoSpaceTier {
   timeoutMs: number;
   startPct: number;
   endPct: number;
-  buildPayload: (wanPrompt: string, aspectRatio: VideoAspectOption) => unknown[];
+  buildPayload: (
+    wanPrompt: string,
+    aspectRatio: VideoAspectOption,
+    duration: 5 | 10,
+    quality: VideoQualityOption
+  ) => unknown[];
 }
 
 const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
@@ -2666,7 +2712,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 75000,
     startPct: 10,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, _duration) => {
       const arChoice =
         aspectRatio === '9:16'
           ? '9:16 (480x832)'
@@ -2676,7 +2722,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
       return [
         wanPrompt,
         arChoice,
-        4,
+        5,
         WAN_NEGATIVE_PROMPT,
         4,
         1,
@@ -2696,7 +2742,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     buildPayload: (wanPrompt) => [
       wanPrompt,
       -1,
-      24,
+      32,
       25,
     ],
   },
@@ -2707,7 +2753,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 65000,
     startPct: 15,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2719,7 +2765,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         null,
         h,
         w,
-        2,
+        duration === 10 ? 5 : 5,
         42,
         'conv',
         false,
@@ -2757,7 +2803,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
     timeoutMs: 65000,
     startPct: 16,
     endPct: 80,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2769,7 +2815,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         null,
         h,
         w,
-        2,
+        duration === 10 ? 5 : 5,
         42,
         'conv',
         false,
@@ -2795,7 +2841,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
       return [
         null,
         wanPrompt,
-        3,
+        5,
         false,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2826,7 +2872,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         h,
         w,
         'text-to-video',
-        3,
+        5,
         9,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2855,7 +2901,7 @@ const LIVE_VIDEO_SPACE_TIERS: LiveVideoSpaceTier[] = [
         WAN_NEGATIVE_PROMPT,
         wanW,
         wanH,
-        49,
+        81,
         18,
         5,
         -1,
@@ -2930,7 +2976,7 @@ async function generateViaLiveSpaceTier(
   quality: VideoQualityOption,
   onProgress?: (pct: number) => void,
   clientHfToken?: string
-): Promise<string | null> {
+): Promise<{ url: string; mastered: boolean } | null> {
   const token = clientHfToken || HF_ACCESS_TOKEN;
   const headerSets: Array<Record<string, string>> = token
     ? [{ Authorization: `Bearer ${token}`, 'X-HF-Token': token }, {}]
@@ -2942,7 +2988,7 @@ async function generateViaLiveSpaceTier(
       const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
         method: 'POST',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio) }),
+        body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio, targetSeconds, quality) }),
         signal: AbortSignal.timeout(12000),
       });
       if (!postRes.ok) continue;
@@ -3065,7 +3111,7 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
   }, 1250);
 
   try {
-    const wanPrompt = buildWanTextToVideoPrompt(job.prompt, job.aspectRatio);
+    const wanPrompt = buildWanTextToVideoPrompt(job.prompt, job.aspectRatio, job.duration, job.quality);
     updateProgress(6);
 
     // 1. Try Hugging Face Inference Providers (fal-ai / wavespeed) first when HF_TOKEN supports it
@@ -3080,13 +3126,14 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
       job.progress = 100;
       job.status = 'completed';
       job.videoUrl = infVideo.url;
+      job.mastered = true;
       job.model = infVideo.model;
       return;
     }
 
     // 2. Try all verified RUNNING real Text-to-Video Spaces (Wan 2.2, LTX-2.5, LTX-2.3, LTX-Distilled, Wan 2.1)
     for (const tier of LIVE_VIDEO_SPACE_TIERS) {
-      const videoUrl = await generateViaLiveSpaceTier(
+      const result = await generateViaLiveSpaceTier(
         tier,
         wanPrompt,
         job.duration,
@@ -3095,10 +3142,11 @@ async function executeVideoJobInBackground(job: VideoJobState, clientHfToken?: s
         updateProgress,
         clientHfToken
       );
-      if (videoUrl) {
+      if (result) {
         job.progress = 100;
         job.status = 'completed';
-        job.videoUrl = videoUrl;
+        job.videoUrl = result.url;
+        job.mastered = result.mastered;
         job.model = tier.model;
         return;
       }
@@ -3147,7 +3195,7 @@ app.post('/api/master-wan-video', async (req, res) => {
       const authHeaders: Record<string, string> = HF_ACCESS_TOKEN
         ? { Authorization: `Bearer ${HF_ACCESS_TOKEN}`, 'X-HF-Token': HF_ACCESS_TOKEN }
         : {};
-      const videoUrl = await fetchAndMasterWanClip(
+      const result = await fetchAndMasterWanClip(
         rawVideoUrl,
         authHeaders,
         duration,
@@ -3157,10 +3205,11 @@ app.post('/api/master-wan-video', async (req, res) => {
           job.progress = Math.max(job.progress, Math.min(99, Math.round(pct)));
         }
       );
-      if (videoUrl) {
+      if (result) {
         job.progress = 100;
         job.status = 'completed';
-        job.videoUrl = videoUrl;
+        job.videoUrl = result.url;
+        job.mastered = result.mastered;
         job.model = WAN22_14B_T2V_MODEL;
       } else {
         job.status = 'failed';
@@ -3234,6 +3283,7 @@ app.get('/api/generate-video/status/:jobId', (req, res) => {
     status: job.status,
     progress: job.progress,
     videoUrl: job.videoUrl || null,
+    mastered: Boolean(job.mastered),
     prompt: job.prompt,
     duration: job.duration,
     aspectRatio: job.aspectRatio,

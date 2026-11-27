@@ -2265,7 +2265,12 @@ export function normalizeVideoQuality(val: any): VideoQualityOption {
   return '720p';
 }
 
-export function buildWanTextToVideoPrompt(rawPrompt: string, aspectRatio: VideoAspectOption): string {
+export function buildWanTextToVideoPrompt(
+  rawPrompt: string,
+  aspectRatio: VideoAspectOption,
+  duration: 5 | 10 = 10,
+  quality: VideoQualityOption = '720p'
+): string {
   const cleanedRaw =
     rawPrompt
       .replace(
@@ -2281,7 +2286,19 @@ export function buildWanTextToVideoPrompt(rawPrompt: string, aspectRatio: VideoA
       ? 'Cinematic real-world 1:1 live-action video of'
       : 'Cinematic real-world 16:9 widescreen live-action video of';
 
-  return `${framingText} ${cleanedRaw}, fluid natural 3D motion, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, rich detail, sharp optical focus.`;
+  const pacingText =
+    duration === 10
+      ? 'unhurried continuous 10-second tracking sequence'
+      : 'smooth continuous 5-second sequence';
+
+  const clarityText =
+    quality === '1080p'
+      ? 'ultra-sharp 1080p cinema clarity, rich fine texture'
+      : quality === '480p'
+      ? 'clean optical focus, balanced cinema lighting'
+      : 'sharp HD optical focus, rich detail';
+
+  return `${framingText} ${cleanedRaw}, ${pacingText}, fluid natural 3D motion, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, ${clarityText}.`;
 }
 
 export function extractGradioVideoUrl(sseText: string, spaceBaseUrl: string): string | null {
@@ -2304,7 +2321,12 @@ export interface WanSpaceTierSpec {
   endpoint: string;
   startPct: number;
   endPct: number;
-  buildPayload: (wanPrompt: string, aspectRatio: VideoAspectOption) => unknown[];
+  buildPayload: (
+    wanPrompt: string,
+    aspectRatio: VideoAspectOption,
+    duration: 5 | 10,
+    quality: VideoQualityOption
+  ) => unknown[];
 }
 
 export async function generateViaHfInferenceRouterVideo(
@@ -2366,7 +2388,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
       return [
         wanPrompt,
         arChoice,
-        4,
+        5,
         WAN_NEGATIVE_PROMPT,
         4,
         1,
@@ -2385,7 +2407,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     buildPayload: (wanPrompt) => [
       wanPrompt,
       -1,
-      24,
+      32,
       25,
     ],
   },
@@ -2395,7 +2417,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/generate_video',
     startPct: 15,
     endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2407,7 +2429,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         null,
         h,
         w,
-        2,
+        duration === 10 ? 5 : 5,
         42,
         'conv',
         false,
@@ -2443,7 +2465,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
     endpoint: '/run',
     startPct: 16,
     endPct: 92,
-    buildPayload: (wanPrompt, aspectRatio) => {
+    buildPayload: (wanPrompt, aspectRatio, duration) => {
       const [h, w] =
         aspectRatio === '9:16'
           ? [832, 512]
@@ -2455,7 +2477,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         null,
         h,
         w,
-        2,
+        duration === 10 ? 5 : 5,
         42,
         'conv',
         false,
@@ -2480,7 +2502,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
       return [
         null,
         wanPrompt,
-        3,
+        5,
         false,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2510,7 +2532,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         h,
         w,
         'text-to-video',
-        3,
+        5,
         9,
         Math.floor(Math.random() * 2147483647),
         true,
@@ -2538,7 +2560,7 @@ export const WAN_SPACE_TIERS: WanSpaceTierSpec[] = [
         WAN_NEGATIVE_PROMPT,
         wanW,
         wanH,
-        49,
+        81,
         18,
         5,
         -1,
@@ -2657,7 +2679,9 @@ export function decodeStatelessVideoJob(jobId: string): StatelessVideoState | nu
 export async function submitWanSpaceTier(
   tierIdx: number,
   cleanPrompt: string,
-  aspectRatio: VideoAspectOption
+  aspectRatio: VideoAspectOption,
+  duration: 5 | 10 = 10,
+  quality: VideoQualityOption = '720p'
 ): Promise<{ eventId: string | null; quotaExceeded: boolean; anonymous?: boolean }> {
   const tier = WAN_SPACE_TIERS[tierIdx];
   if (!tier) return { eventId: null, quotaExceeded: false };
@@ -2669,7 +2693,7 @@ export async function submitWanSpaceTier(
         { headers: {}, anonymous: true },
       ]
     : [{ headers: {}, anonymous: true }];
-  const wanPrompt = buildWanTextToVideoPrompt(cleanPrompt, aspectRatio);
+  const wanPrompt = buildWanTextToVideoPrompt(cleanPrompt, aspectRatio, duration, quality);
 
   let sawQuota = false;
   for (const item of headerSets) {
@@ -2677,7 +2701,7 @@ export async function submitWanSpaceTier(
       const postRes = await fetch(`${tier.baseUrl}/gradio_api/call${tier.endpoint}`, {
         method: 'POST',
         headers: { ...item.headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio) }),
+        body: JSON.stringify({ data: tier.buildPayload(wanPrompt, aspectRatio, duration, quality) }),
         signal: AbortSignal.timeout(10000),
       });
       if (!postRes.ok) {
@@ -2710,7 +2734,7 @@ export async function startStatelessVideoJob(body: any): Promise<{ status: numbe
   const startedAt = Date.now();
 
   for (let tierIdx = 0; tierIdx < WAN_SPACE_TIERS.length; tierIdx++) {
-    const submitted = await submitWanSpaceTier(tierIdx, cleanPrompt, aspectRatio);
+    const submitted = await submitWanSpaceTier(tierIdx, cleanPrompt, aspectRatio, duration, quality);
     if (submitted.eventId) {
       const jobId = encodeStatelessVideoJob({
         v: 1,
@@ -2738,7 +2762,7 @@ export async function startStatelessVideoJob(body: any): Promise<{ status: numbe
   }
 
   const infVideo = await generateViaHfInferenceRouterVideo(
-    buildWanTextToVideoPrompt(cleanPrompt, aspectRatio)
+    buildWanTextToVideoPrompt(cleanPrompt, aspectRatio, duration, quality)
   );
   if (infVideo && infVideo.buffer.length <= 4 * 1024 * 1024) {
     return {
@@ -2747,6 +2771,7 @@ export async function startStatelessVideoJob(body: any): Promise<{ status: numbe
         status: 'completed',
         progress: 100,
         videoUrl: `data:video/mp4;base64,${infVideo.buffer.toString('base64')}`,
+        mastered: false,
         prompt: cleanPrompt,
         duration,
         aspectRatio,
@@ -2840,6 +2865,7 @@ export async function pollStatelessVideoJob(
               status: 'completed',
               progress: 100,
               videoUrl: quickUrl,
+              mastered: false,
               prompt: state.p,
               duration: state.d,
               aspectRatio: state.a,
@@ -2860,6 +2886,7 @@ export async function pollStatelessVideoJob(
               status: 'completed',
               progress: 100,
               videoUrl: rawUrl,
+              mastered: false,
               prompt: state.p,
               duration: state.d,
               aspectRatio: state.a,
@@ -2876,7 +2903,7 @@ export async function pollStatelessVideoJob(
 
   // Always try subsequent Wan tiers (even if an earlier tier returned event:error or ZeroGPU quota)
   for (let nextIdx = state.t + 1; nextIdx < WAN_SPACE_TIERS.length; nextIdx++) {
-    const submitted = await submitWanSpaceTier(nextIdx, state.p, state.a);
+    const submitted = await submitWanSpaceTier(nextIdx, state.p, state.a, state.d, state.q);
     if (submitted.eventId) {
       const nextProgress = Math.max(lastProgress, Math.min(85, lastProgress + 6));
       const nextJobId = encodeStatelessVideoJob({
@@ -2903,7 +2930,7 @@ export async function pollStatelessVideoJob(
 
   // Final serverless real-video fallback via Hugging Face Inference Providers (fal-ai / wavespeed)
   const infVideo = await generateViaHfInferenceRouterVideo(
-    buildWanTextToVideoPrompt(state.p, state.a)
+    buildWanTextToVideoPrompt(state.p, state.a, state.d, state.q)
   );
   if (infVideo && infVideo.buffer.length <= 4 * 1024 * 1024) {
     return {
@@ -2913,6 +2940,7 @@ export async function pollStatelessVideoJob(
         status: 'completed',
         progress: 100,
         videoUrl: `data:video/mp4;base64,${infVideo.buffer.toString('base64')}`,
+        mastered: false,
         prompt: state.p,
         duration: state.d,
         aspectRatio: state.a,

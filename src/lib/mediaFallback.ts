@@ -1,6 +1,9 @@
 import type {
   PhotoAspectRatio,
   PhotoQuality,
+  VideoAspectRatio,
+  VideoDuration,
+  VideoQuality,
 } from '../types';
 
 export interface FilterEditPlan {
@@ -479,4 +482,233 @@ export async function editPhotoDirectlyInBrowser(
     editedPrompt ||
     `Edited realistic 35mm DSLR photograph based on the reference image, ${editInstruction}, preserving the main subject identity, pose, and natural lighting cleanly`;
   return await submitAiHordePhotoInBrowser(finalPrompt, aspectRatio, sourceBase64, strength);
+}
+
+function getTargetVideoDimensions(
+  aspectRatio: VideoAspectRatio,
+  quality: VideoQuality
+): [number, number] {
+  const table: Record<VideoAspectRatio, Record<VideoQuality, [number, number]>> = {
+    '16:9': { '480p': [854, 480], '720p': [1280, 720], '1080p': [1920, 1080] },
+    '9:16': { '480p': [480, 854], '720p': [720, 1280], '1080p': [1080, 1920] },
+    '1:1': { '480p': [480, 480], '720p': [720, 720], '1080p': [1080, 1080] },
+  };
+  return table[aspectRatio][quality];
+}
+
+export async function conformVideoToSettingsInBrowser(
+  videoUrl: string,
+  targetDuration: VideoDuration,
+  aspectRatio: VideoAspectRatio,
+  quality: VideoQuality,
+  serverMastered: boolean = false,
+  onProgress?: (pct: number) => void
+): Promise<string | null> {
+  if (!videoUrl) return null;
+
+  let sourceBlobUrl: string | null = null;
+  let shouldRevokeSource = false;
+
+  try {
+    if (videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
+      sourceBlobUrl = videoUrl;
+    } else {
+      const res = await fetch(videoUrl, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      if (blob.size < 4000) return null;
+      sourceBlobUrl = URL.createObjectURL(blob);
+      shouldRevokeSource = true;
+    }
+
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.src = sourceBlobUrl;
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('video metadata timeout')), 12000);
+      video.onloadedmetadata = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      video.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error('video load error'));
+      };
+    });
+
+    const rawDuration = Number.isFinite(video.duration) && video.duration > 0.2 ? video.duration : 0;
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    const [outW, outH] = getTargetVideoDimensions(aspectRatio, quality);
+    const targetRatio = outW / outH;
+    const actualRatio = vw > 0 && vh > 0 ? vw / vh : targetRatio;
+    const durationMatches = rawDuration > 0 && Math.abs(rawDuration - targetDuration) <= 0.45;
+    const aspectMatches = Math.abs(actualRatio - targetRatio) <= 0.08;
+    const qualityMatches = vw >= outW * 0.9 && vh >= outH * 0.9;
+
+    // If the server already mastered it or the raw clip already matches exact settings, return Blob URL immediately
+    if ((serverMastered && durationMatches) || (durationMatches && aspectMatches && qualityMatches)) {
+      shouldRevokeSource = false;
+      onProgress?.(99);
+      return sourceBlobUrl;
+    }
+
+    if (
+      typeof MediaRecorder === 'undefined' ||
+      typeof HTMLCanvasElement === 'undefined' ||
+      typeof document.createElement('canvas').captureStream !== 'function'
+    ) {
+      shouldRevokeSource = false;
+      return sourceBlobUrl;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      shouldRevokeSource = false;
+      return sourceBlobUrl;
+    }
+
+    // Keep one previous-frame buffer for seamless crossfade across loop boundaries
+    const prevCanvas = document.createElement('canvas');
+    prevCanvas.width = outW;
+    prevCanvas.height = outH;
+    const prevCtx = prevCanvas.getContext('2d');
+
+    const drawCoverFrame = (targetCtx: CanvasRenderingContext2D) => {
+      const srcW = video.videoWidth || outW;
+      const srcH = video.videoHeight || outH;
+      const scale = Math.max(outW / srcW, outH / srcH);
+      const drawW = srcW * scale;
+      const drawH = srcH * scale;
+      targetCtx.drawImage(video, (outW - drawW) / 2, (outH - drawH) / 2, drawW, drawH);
+    };
+
+    const mimeCandidates = [
+      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm',
+    ];
+    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    const bps = quality === '1080p' ? 6_500_000 : quality === '720p' ? 4_000_000 : 2_200_000;
+
+    const stream = canvas.captureStream(30);
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: bps,
+    });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunks.push(e.data);
+    };
+
+    const recordedPromise = new Promise<Blob>((resolve, reject) => {
+      recorder.onstop = () => {
+        const outBlob = new Blob(chunks, { type: mimeType.split(';')[0] });
+        resolve(outBlob);
+      };
+      recorder.onerror = () => reject(new Error('MediaRecorder error'));
+    });
+
+    // If raw clip is within 1.4x of targetDuration, gently slow down playbackRate; otherwise keep smooth natural speed + seamless crossfade loops
+    const gentleRate =
+      rawDuration > 0 && rawDuration < targetDuration && rawDuration >= targetDuration * 0.7
+        ? Math.max(0.7, rawDuration / targetDuration)
+        : 1.0;
+
+    video.currentTime = 0;
+    video.playbackRate = gentleRate;
+
+    // Wait for first frame ready before starting recorder
+    await new Promise<void>((resolve) => {
+      if (video.readyState >= 2) {
+        resolve();
+        return;
+      }
+      const t = setTimeout(resolve, 1500);
+      video.oncanplay = () => {
+        clearTimeout(t);
+        resolve();
+      };
+    });
+
+    drawCoverFrame(ctx);
+    recorder.start(250);
+    await video.play().catch(() => {});
+
+    const targetMs = targetDuration * 1000;
+    const startWall = performance.now();
+    let crossfadeUntil = 0;
+    let isSeekingRestart = false;
+
+    await new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        const elapsed = performance.now() - startWall;
+        const pct = Math.min(99, Math.round(85 + (elapsed / targetMs) * 14));
+        onProgress?.(pct);
+
+        if (elapsed >= targetMs) {
+          clearInterval(interval);
+          resolve();
+          return;
+        }
+
+        // Seamless loop before reaching raw end so there is zero freeze/stutter
+        if (
+          rawDuration > 0.6 &&
+          !isSeekingRestart &&
+          (video.ended || video.currentTime >= rawDuration - 0.12)
+        ) {
+          isSeekingRestart = true;
+          if (prevCtx) {
+            prevCtx.clearRect(0, 0, outW, outH);
+            prevCtx.drawImage(canvas, 0, 0);
+            crossfadeUntil = performance.now() + 360;
+          }
+          video.currentTime = 0;
+          video.play().catch(() => {});
+          setTimeout(() => {
+            isSeekingRestart = false;
+          }, 180);
+        }
+
+        drawCoverFrame(ctx);
+        if (prevCtx && crossfadeUntil > performance.now()) {
+          const alpha = Math.max(0, Math.min(1, (crossfadeUntil - performance.now()) / 360));
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(prevCanvas, 0, 0);
+          ctx.restore();
+        }
+      }, 33);
+    });
+
+    video.pause();
+    if (recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+
+    const outBlob = await recordedPromise;
+    stream.getTracks().forEach((t) => t.stop());
+
+    if (shouldRevokeSource && sourceBlobUrl) {
+      URL.revokeObjectURL(sourceBlobUrl);
+    }
+
+    if (outBlob.size < 4000) return null;
+    onProgress?.(99);
+    return URL.createObjectURL(outBlob);
+  } catch {
+    if (shouldRevokeSource && sourceBlobUrl) {
+      return sourceBlobUrl;
+    }
+    return null;
+  }
 }

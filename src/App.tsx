@@ -12,6 +12,7 @@ import { ProfileModal } from './components/ProfileModal';
 import { VoiceAudioPlayer } from './components/VoiceAudioPlayer';
 import {
   applyCanvasPhotoFilterPlan,
+  conformVideoToSettingsInBrowser,
   editPhotoDirectlyInBrowser,
   generatePhotoDirectlyInBrowser,
   pollAiHordeImageInBrowser,
@@ -72,8 +73,10 @@ const loadSavedGenerationSettings = (): GenerationSettings => {
             ? parsed.photoAspectRatio
             : DEFAULT_GENERATION_SETTINGS.photoAspectRatio,
         videoDuration:
-          parsed?.videoDuration === 5 || parsed?.videoDuration === 10
-            ? parsed.videoDuration
+          Number(parsed?.videoDuration) === 5
+            ? 5
+            : Number(parsed?.videoDuration) === 10
+            ? 10
             : DEFAULT_GENERATION_SETTINGS.videoDuration,
         videoAspectRatio:
           parsed?.videoAspectRatio === '16:9' ||
@@ -590,6 +593,36 @@ export default function App() {
     textareaRef.current?.focus();
   }, []);
 
+  // Keep outer document/viewport locked at scroll (0, 0) so header and prompt bar never bounce up/down on mobile
+  useEffect(() => {
+    const resetViewportScroll = () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
+      if (document.documentElement.scrollTop !== 0) {
+        document.documentElement.scrollTop = 0;
+      }
+      if (document.body.scrollTop !== 0) {
+        document.body.scrollTop = 0;
+      }
+    };
+
+    resetViewportScroll();
+    window.addEventListener('scroll', resetViewportScroll, { passive: true });
+    const vv = window.visualViewport;
+    if (vv) {
+      vv.addEventListener('scroll', resetViewportScroll, { passive: true });
+      vv.addEventListener('resize', resetViewportScroll, { passive: true });
+    }
+    return () => {
+      window.removeEventListener('scroll', resetViewportScroll);
+      if (vv) {
+        vv.removeEventListener('scroll', resetViewportScroll);
+        vv.removeEventListener('resize', resetViewportScroll);
+      }
+    };
+  }, []);
+
   // Close menus on outside click
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
@@ -902,7 +935,8 @@ export default function App() {
   // Download full 5s / 10s video cleanly via Blob URL
   const downloadVideo = async (url: string, filename: string) => {
     try {
-      const res = await fetch(url);
+      const sourceUrl = videoBlobUrlsRef.current[url] || videoBlobUrls[url] || url;
+      const res = await fetch(sourceUrl);
       if (!res.ok) return;
       const blob = await res.blob();
       const targetName =
@@ -1499,8 +1533,9 @@ export default function App() {
       setPendingPhotoAspect(initialAspect);
       setThinkingLabel(isPhotoEditRequest ? 'Editing your image' : 'Creating your image');
     } else if (chatMode === 'video') {
+      const targetDur: VideoDuration = genSettings.videoDuration === 5 ? 5 : 10;
       setPendingVideoAspect(genSettings.videoAspectRatio);
-      setThinkingLabel('Generating video...');
+      setThinkingLabel(`Generating ${targetDur}s ${genSettings.videoQuality} video...`);
       videoProgressFloorRef.current = 1;
       videoTickCountRef.current = 0;
       setVideoProgress(1);
@@ -1782,7 +1817,10 @@ export default function App() {
 
     // Video Mode: Smooth, lag-free realistic 5s or 10s Wan 2.2 Text-to-Video with continuous live % progress
     if (chatMode === 'video') {
-      setThinkingLabel('Generating video...');
+      const selectedDuration: VideoDuration = genSettings.videoDuration === 5 ? 5 : 10;
+      const selectedAspect = genSettings.videoAspectRatio;
+      const selectedQuality = genSettings.videoQuality;
+      setThinkingLabel(`Generating ${selectedDuration}s ${selectedQuality} video...`);
       const advanceVideoFloor = (floor: number) => {
         const clampedFloor = Math.max(1, Math.min(99, Math.round(floor)));
         if (clampedFloor > videoProgressFloorRef.current) {
@@ -1804,30 +1842,33 @@ export default function App() {
             'ocean waves rolling onto a golden sandy coastline at sunset with seabirds gliding across the sky';
         }
 
-        const selectedDuration: VideoDuration = genSettings.videoDuration === 5 ? 5 : 10;
-        const selectedAspect = genSettings.videoAspectRatio;
-        const selectedQuality = genSettings.videoQuality;
-
         const framingText =
           selectedAspect === '9:16'
-            ? 'Cinematic real-world vertical 9:16 live-action video of'
+            ? `Cinematic real-world ${selectedDuration}-second vertical 9:16 live-action video of`
             : selectedAspect === '1:1'
-            ? 'Cinematic real-world 1:1 live-action video of'
-            : 'Cinematic real-world 16:9 widescreen live-action video of';
-        const wanPrompt = `${framingText} ${cleanPrompt}, fluid natural 3D motion, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, rich detail, sharp optical focus.`;
+            ? `Cinematic real-world ${selectedDuration}-second 1:1 live-action video of`
+            : `Cinematic real-world ${selectedDuration}-second 16:9 widescreen live-action video of`;
+        const qualityCue =
+          selectedQuality === '1080p'
+            ? 'ultra-crisp 1080p full HD cinema clarity'
+            : selectedQuality === '480p'
+            ? 'clean 480p cinema clarity'
+            : 'crisp 720p HD cinema clarity';
+        const wanPrompt = `${framingText} ${cleanPrompt}, fluid natural 3D motion across the full ${selectedDuration}-second sequence, continuous smooth movement, realistic physics, authentic 35mm cinema lighting, ${qualityCue}, sharp optical focus.`;
         const wanNeg =
           'static, blurred details, subtitles, paintings, still picture, worst quality, low quality, ugly, deformed, camera zoom, ken burns effect, watermark, text, signature';
 
         let finalVideoUrl: string | null = null;
+        let serverMastered = false;
 
-        // Stream Gradio SSE with live step-by-step % updates + async EPZS 30fps server mastering
+        // Stream Gradio SSE with live step-by-step % updates + async 30fps server mastering
         const callWanSpaceAndMaster = async (
           spaceBase: string,
           endpoint: string,
           payloadData: unknown[],
           sseStartPct: number,
           sseEndPct: number
-        ): Promise<{ url: string | null; quotaExceeded: boolean }> => {
+        ): Promise<{ url: string | null; quotaExceeded: boolean; mastered: boolean }> => {
           try {
             const postRes = await fetch(`${spaceBase}/gradio_api/call${endpoint}`, {
               method: 'POST',
@@ -1840,11 +1881,12 @@ export default function App() {
               return {
                 url: null,
                 quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(errBody),
+                mastered: false,
               };
             }
             const postJson = await postRes.json();
             const eventId = postJson?.event_id;
-            if (!eventId) return { url: null, quotaExceeded: false };
+            if (!eventId) return { url: null, quotaExceeded: false, mastered: false };
 
             const sseCtrl = new AbortController();
             const sseHardTimeout = setTimeout(() => sseCtrl.abort(), 95000);
@@ -1859,7 +1901,7 @@ export default function App() {
             if (!sseRes.ok || !sseRes.body) {
               clearTimeout(sseHardTimeout);
               clearTimeout(initialActivityTimeout);
-              return { url: null, quotaExceeded: false };
+              return { url: null, quotaExceeded: false, mastered: false };
             }
 
             const reader = sseRes.body.getReader();
@@ -1903,6 +1945,7 @@ export default function App() {
                 return {
                   url: null,
                   quotaExceeded: isExplicitQuota,
+                  mastered: false,
                 };
               }
             }
@@ -1924,6 +1967,7 @@ export default function App() {
               return {
                 url: null,
                 quotaExceeded: /ZeroGPU quota|exceeded your.*quota/i.test(sseText),
+                mastered: false,
               };
             }
 
@@ -1939,12 +1983,18 @@ export default function App() {
               }),
               signal: AbortSignal.timeout(15000),
             });
-            if (!masterRes.ok) return { url: rawVideoUrl, quotaExceeded: false };
+            if (!masterRes.ok) return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
             const masterJson = await masterRes.json();
-            if (masterJson?.videoUrl) return { url: masterJson.videoUrl, quotaExceeded: false };
+            if (masterJson?.videoUrl) {
+              return {
+                url: masterJson.videoUrl,
+                quotaExceeded: false,
+                mastered: Boolean(masterJson?.mastered),
+              };
+            }
 
             let masterJobId = masterJson?.jobId;
-            if (!masterJobId) return { url: rawVideoUrl, quotaExceeded: false };
+            if (!masterJobId) return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
 
             for (let mPoll = 0; mPoll < 95; mPoll++) {
               await new Promise((r) => setTimeout(r, 850));
@@ -1961,16 +2011,20 @@ export default function App() {
                   advanceVideoFloor(mStatusJson.progress);
                 }
                 if (mStatusJson?.status === 'completed' && mStatusJson?.videoUrl) {
-                  return { url: mStatusJson.videoUrl, quotaExceeded: false };
+                  return {
+                    url: mStatusJson.videoUrl,
+                    quotaExceeded: false,
+                    mastered: Boolean(mStatusJson?.mastered),
+                  };
                 }
                 if (mStatusJson?.status === 'failed') break;
               } catch {
                 // Continue polling on transient network hiccup
               }
             }
-            return { url: rawVideoUrl, quotaExceeded: false };
+            return { url: rawVideoUrl, quotaExceeded: false, mastered: false };
           } catch {
-            return { url: null, quotaExceeded: false };
+            return { url: null, quotaExceeded: false, mastered: false };
           }
         };
 
@@ -2012,6 +2066,7 @@ export default function App() {
             const startData = await startRes.json();
             if (startData?.videoUrl) {
               finalVideoUrl = startData.videoUrl;
+              serverMastered = Boolean(startData?.mastered);
             } else {
               let activeJobId = startData?.jobId;
               let consecutiveServerErrors = 0;
@@ -2037,6 +2092,7 @@ export default function App() {
                   }
                   if (pollData?.status === 'completed' && pollData?.videoUrl) {
                     finalVideoUrl = pollData.videoUrl;
+                    serverMastered = Boolean(pollData?.mastered);
                     break;
                   }
                   if (pollData?.status === 'failed') {
@@ -2074,7 +2130,7 @@ export default function App() {
               payload: [
                 wanPrompt,
                 upsamplerAspect,
-                4,
+                5,
                 wanNeg,
                 4,
                 1,
@@ -2087,7 +2143,7 @@ export default function App() {
             {
               baseUrl: 'https://mediasynthesismuseum-modelscope-text-to-video.hf.space',
               endpoint: '/generate',
-              payload: [wanPrompt, -1, 24, 25],
+              payload: [wanPrompt, -1, 32, 25],
               startPct: 18,
             },
             {
@@ -2098,7 +2154,7 @@ export default function App() {
                 null,
                 selectedAspect === '9:16' ? 832 : 512,
                 selectedAspect === '9:16' ? 512 : selectedAspect === '1:1' ? 512 : 832,
-                2,
+                5,
                 42,
                 'conv',
                 false,
@@ -2117,7 +2173,7 @@ export default function App() {
                 null,
                 null,
                 16,
-                4,
+                5,
                 selectedAspect === '9:16'
                   ? '9:16 (704×1280)'
                   : selectedAspect === '1:1'
@@ -2134,7 +2190,7 @@ export default function App() {
                 null,
                 selectedAspect === '9:16' ? 832 : 512,
                 selectedAspect === '9:16' ? 512 : selectedAspect === '1:1' ? 512 : 832,
-                2,
+                5,
                 42,
                 'conv',
                 false,
@@ -2149,7 +2205,7 @@ export default function App() {
               payload: [
                 null,
                 wanPrompt,
-                3,
+                5,
                 false,
                 Math.floor(Math.random() * 2147483647),
                 true,
@@ -2169,7 +2225,7 @@ export default function App() {
                 ltxDistH,
                 ltxDistW,
                 'text-to-video',
-                3,
+                5,
                 9,
                 Math.floor(Math.random() * 2147483647),
                 true,
@@ -2181,7 +2237,7 @@ export default function App() {
             {
               baseUrl: 'https://numanajmal0-wan-video-api.hf.space',
               endpoint: '/generate',
-              payload: ['wan-base', wanPrompt, wanNeg, w1W, w1H, 49, 18, 5, -1, 1, null],
+              payload: ['wan-base', wanPrompt, wanNeg, w1W, w1H, 81, 18, 5, -1, 1, null],
               startPct: 34,
             },
             {
@@ -2229,13 +2285,29 @@ export default function App() {
               81
             );
             finalVideoUrl = res.url;
+            serverMastered = res.mastered;
           }
         }
 
         if (finalVideoUrl) {
+          advanceVideoFloor(86);
+          const conformedBlobUrl = await conformVideoToSettingsInBrowser(
+            finalVideoUrl,
+            selectedDuration,
+            selectedAspect,
+            selectedQuality,
+            serverMastered,
+            (pct) => advanceVideoFloor(pct)
+          );
+          if (conformedBlobUrl) {
+            videoBlobUrlsRef.current[finalVideoUrl] = conformedBlobUrl;
+            setVideoBlobUrls((prev) => ({ ...prev, [finalVideoUrl!]: conformedBlobUrl }));
+          } else {
+            await preloadVideoInMemory(finalVideoUrl);
+          }
+
           advanceVideoFloor(99);
           setVideoProgress((prev) => Math.max(prev, 99));
-          await preloadVideoInMemory(finalVideoUrl);
           videoProgressFloorRef.current = 100;
           setVideoProgress(100);
           await new Promise((r) => setTimeout(r, 180));
@@ -2437,16 +2509,16 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
-    <div className="h-screen h-[100dvh] w-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] relative">
+    <div className="fixed inset-0 w-full h-full text-[#e3e3e3] flex flex-col overflow-hidden bg-[#191919] overscroll-none">
       {/* Main Content — full browser width */}
       <div className="w-full flex-1 flex flex-col justify-between h-full min-h-0 relative">
           
           {/* Top Header */}
           <motion.header
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 bg-[#191919]"
           >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
               <motion.button 
@@ -2550,7 +2622,7 @@ export default function App() {
         </motion.header>
 
         {/* Chat Canvas */}
-        <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10">
+        <div id="chat-canvas" ref={chatCanvasRef} className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain w-full px-4 sm:px-6 lg:px-10 py-4 flex flex-col z-10">
           {messages.length === 0 && !isThinking ? (
             <motion.div
               key={currentScope || 'guest'}
@@ -2922,7 +2994,7 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="px-3 pb-3 pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0">
+        <div className="px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 w-full relative shrink-0 bg-[#191919]">
           <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}
