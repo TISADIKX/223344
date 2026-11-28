@@ -5,11 +5,9 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-html, body {
-  height: 100%;
-  height: 100dvh;
-  max-height: 100dvh;
+html {
   width: 100%;
+  height: 100%;
   margin: 0;
   padding: 0;
   overflow: hidden !important;
@@ -17,24 +15,33 @@ html, body {
   background-color: #191919;
 }
 
+body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  background-color: #191919;
+  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
 #root {
   position: fixed;
-  top: 0;
+  top: var(--app-top, 0px);
   left: 0;
   right: 0;
-  height: var(--ios-kb-height, 100dvh);
-  min-height: var(--ios-kb-height, 100dvh);
-  max-height: var(--ios-kb-height, 100dvh);
+  height: var(--app-height, 100svh);
+  min-height: var(--app-height, 100svh);
+  max-height: var(--app-height, 100svh);
   width: 100%;
   margin: 0;
   padding: 0;
-  overflow: hidden;
-  overscroll-behavior: none;
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
   background-color: #191919;
-}
-
-body {
-  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 #chat-canvas {

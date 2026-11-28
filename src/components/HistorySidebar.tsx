@@ -178,7 +178,7 @@ export const HistorySidebar: React.FC<HistorySidebarProps> = ({
           )}
 
           {/* Mini Scrollable History List */}
-          <div className="mt-1.5 max-h-[245px] sm:max-h-[280px] overflow-y-auto space-y-0.5">
+          <div className="mt-1.5 max-h-[245px] sm:max-h-[280px] overflow-y-auto overscroll-y-contain touch-pan-y space-y-0.5">
             {sortedSessions.length === 0 ? (
               <motion.div
                 initial={{ opacity: 0, y: 6 }}

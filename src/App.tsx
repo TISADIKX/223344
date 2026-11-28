@@ -596,7 +596,7 @@ export default function App() {
     }
   }, []);
 
-  // Lock outer document scroll at (0, 0), shrink only on mobile virtual keyboard, and prevent page-level touch dragging on header/empty screen/prompt wrapper
+  // Lock outer document scroll at (0, 0), pin #root strictly to visualViewport, and prevent page-level touch dragging outside scrollable regions
   useLayoutEffect(() => {
     let touchStartY = 0;
 
@@ -611,19 +611,16 @@ export default function App() {
         document.body.scrollTop = 0;
       }
       const vv = window.visualViewport;
-      if (vv && vv.height > 180 && vv.height < window.innerHeight - 40) {
-        document.documentElement.style.setProperty(
-          '--ios-kb-height',
-          `${Math.max(260, Math.round(vv.height))}px`
-        );
-      } else {
-        document.documentElement.style.removeProperty('--ios-kb-height');
-      }
+      const targetHeight = Math.max(240, Math.round(vv ? vv.height : window.innerHeight));
+      const targetTop = Math.max(0, Math.round(vv ? vv.offsetTop : 0));
+      document.documentElement.style.setProperty('--app-height', `${targetHeight}px`);
+      document.documentElement.style.setProperty('--app-top', `${targetTop}px`);
     };
 
-    const handleFocusOut = () => {
+    const handleFocusChange = () => {
       syncViewportLock();
-      setTimeout(syncViewportLock, 60);
+      setTimeout(syncViewportLock, 80);
+      setTimeout(syncViewportLock, 260);
     };
 
     const handleTouchStart = (e: TouchEvent) => {
@@ -670,10 +667,12 @@ export default function App() {
     };
 
     syncViewportLock();
+    const rafId = requestAnimationFrame(syncViewportLock);
     window.addEventListener('scroll', syncViewportLock, { passive: true });
     window.addEventListener('resize', syncViewportLock, { passive: true });
-    window.addEventListener('orientationchange', syncViewportLock, { passive: true });
-    window.addEventListener('focusout', handleFocusOut, { passive: true });
+    window.addEventListener('orientationchange', handleFocusChange, { passive: true });
+    window.addEventListener('focusin', handleFocusChange, { passive: true });
+    window.addEventListener('focusout', handleFocusChange, { passive: true });
     document.addEventListener('touchstart', handleTouchStart, { passive: true });
     document.addEventListener('touchmove', handleTouchMove, { passive: false });
     const vv = window.visualViewport;
@@ -682,10 +681,12 @@ export default function App() {
       vv.addEventListener('resize', syncViewportLock, { passive: true });
     }
     return () => {
+      cancelAnimationFrame(rafId);
       window.removeEventListener('scroll', syncViewportLock);
       window.removeEventListener('resize', syncViewportLock);
-      window.removeEventListener('orientationchange', syncViewportLock);
-      window.removeEventListener('focusout', handleFocusOut);
+      window.removeEventListener('orientationchange', handleFocusChange);
+      window.removeEventListener('focusin', handleFocusChange);
+      window.removeEventListener('focusout', handleFocusChange);
       document.removeEventListener('touchstart', handleTouchStart);
       document.removeEventListener('touchmove', handleTouchMove);
       if (vv) {
@@ -2654,7 +2655,7 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 sticky top-0 bg-[#191919] touch-none"
+            className="w-full flex items-center justify-between px-4 sm:px-6 lg:px-8 pt-3.5 pb-2.5 border-b border-white/[0.06] z-30 shrink-0 relative bg-[#191919] touch-none"
           >
             <div className="relative flex items-center gap-2.5 sm:gap-3.5 min-w-0">
               <motion.button 
@@ -3138,7 +3139,7 @@ export default function App() {
         />
 
         {/* Prompt Input Container */}
-        <div className="sticky bottom-0 shrink-0 w-full px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 bg-[#191919] overscroll-none">
+        <div className="relative shrink-0 w-full px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5 lg:px-10 z-20 bg-[#191919] overscroll-none">
           <div className="w-full max-w-6xl mx-auto relative">
 
           {/* Upload Validation Alert */}
